@@ -1,0 +1,7 @@
+.git
+.gitignore
+.github
+Dockerfile*
+compose*.yml
+README.md
+**/*_test.go

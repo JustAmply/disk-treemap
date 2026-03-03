@@ -1,0 +1,25 @@
+services:
+  disk-treemap:
+    build: .
+    image: disk-treemap:latest
+    environment:
+      ANALYZE_ROOT: /scanroot
+      LISTEN_ADDR: :8080
+      DATA_DIR: /data
+      SCAN_MAX_CONCURRENCY: 4
+      SCAN_TIMEOUT: 0
+      MAX_CHILDREN_PER_QUERY: 500
+    volumes:
+      - /host/path/to/analyze:/scanroot:ro
+      - treemap-data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+
+volumes:
+  treemap-data:
