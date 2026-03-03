@@ -21,10 +21,10 @@ jobs:
         run: go mod download
 
       - name: Run tests
-        run: go test ./...
+        run: go test -mod=mod ./...
 
       - name: Build server
-        run: go build ./cmd/server
+        run: go build -mod=mod ./cmd/server
 
   docker:
     runs-on: ubuntu-latest
@@ -68,4 +68,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
