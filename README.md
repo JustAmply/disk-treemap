@@ -10,7 +10,8 @@ Lightweight WizTree-like browser UI for disk usage analysis in Docker.
 - Root path constrained by `ANALYZE_ROOT`
 - SQLite-backed scan snapshots (`/data/scan.db`)
 - Treemap UI + largest-items table + breadcrumb drilldown
-- Distroless non-root runtime image
+- Distroless runtime image
+- Runs as root in-container for broader read access while scanning bind-mounted paths
 
 ## Container Configuration
 
@@ -32,6 +33,7 @@ Optional:
 docker build -t disk-treemap:latest .
 
 docker run --rm \
+  --user 0:0 \
   -p 8080:8080 \
   -e ANALYZE_ROOT=/scanroot \
   -e DATA_DIR=/data \
@@ -74,16 +76,16 @@ Then open `http://localhost:8080`.
 
 ## Hardening Notes
 
-The compose files include:
+The compose file includes:
 
 - read-only container filesystem
 - `/tmp` as tmpfs
-- dropped Linux capabilities
 - read-only bind mount for scan root
+
+If you need stricter capabilities policy, test carefully: dropping all capabilities can reintroduce permission-denied errors even when running as root.
 
 ## Limitations
 
 - No NTFS MFT-level acceleration (filesystem walk only)
 - Symlinks are not followed
 - External authentication is expected (reverse proxy)
-

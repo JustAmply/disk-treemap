@@ -7,12 +7,14 @@ RUN go mod download \
     && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod -trimpath -ldflags="-s -w" -o /out/disk-treemap ./cmd/server \
     && mkdir -p /out/data
 
-# Runtime stage
-FROM gcr.io/distroless/static-debian12:nonroot
+# Runtime stage (root user for broader scan read permissions)
+FROM gcr.io/distroless/static-debian12
 WORKDIR /app
-COPY --from=build --chown=65532:65532 /out/disk-treemap /app/disk-treemap
-COPY --chown=65532:65532 web /app/web
-COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build /out/disk-treemap /app/disk-treemap
+COPY web /app/web
+COPY --from=build /out/data /data
+
+USER 0:0
 
 ENV LISTEN_ADDR=:8080 \
     DATA_DIR=/data

@@ -2,6 +2,7 @@ services:
   disk-treemap:
     build: .
     image: disk-treemap:latest
+    user: "0:0"
     environment:
       ANALYZE_ROOT: /scanroot
       LISTEN_ADDR: :8080
@@ -18,8 +19,6 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-    cap_drop:
-      - ALL
 
 volumes:
   treemap-data:
