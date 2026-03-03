@@ -17,6 +17,9 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: Resolve modules
+        run: go mod download
+
       - name: Run tests
         run: go test ./...
 
@@ -65,3 +68,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
