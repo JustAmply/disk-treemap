@@ -25,6 +25,15 @@ type ScanRun struct {
 	TotalBytes   int64      `json:"total_bytes"`
 	TotalNodes   int64      `json:"total_nodes"`
 	WarningCount int64      `json:"warning_count"`
+	Progress     *ScanProgress `json:"progress,omitempty"`
+}
+type ScanProgress struct {
+	CurrentPath  string     `json:"current_path"`
+	ScannedNodes int64      `json:"scanned_nodes"`
+	ScannedFiles int64      `json:"scanned_files"`
+	ScannedDirs  int64      `json:"scanned_dirs"`
+	ScannedBytes int64      `json:"scanned_bytes"`
+	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 }
 
 type Node struct {

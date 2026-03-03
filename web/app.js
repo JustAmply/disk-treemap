@@ -34,7 +34,7 @@
     if (cfg.latest_scan) {
       state.activeScanId = cfg.latest_scan.id;
       if (cfg.latest_scan.status === "running" || cfg.latest_scan.status === "queued") {
-        setScanState(`Scan ${cfg.latest_scan.status}`);
+        setScanState(`Scan ${cfg.latest_scan.status}`, true);
         startPolling(state.activeScanId);
       } else {
         updateMeta(cfg.latest_scan);
@@ -47,12 +47,12 @@
 
   async function runScan() {
     disableScanButton(true);
-    setScanState("Starting scan...");
+    setScanState("Starting scan...", true);
 
     try {
       const result = await apiPost("/api/v1/scans");
       state.activeScanId = result.scan_id;
-      setScanState(`Scan #${state.activeScanId} running`);
+      setScanState(`Scan #${state.activeScanId} running`, true);
       startPolling(state.activeScanId);
     } catch (err) {
       disableScanButton(false);
@@ -88,8 +88,12 @@
           return;
         }
 
-        setScanState(`Scan ${scan.status}`);
-        state.pollingHandle = setTimeout(poll, 1500);
+        if (scan.progress) {
+          setScanState(`Scanning ${scan.progress.scanned_nodes} items (${formatBytes(scan.progress.scanned_bytes)})`, true);
+        } else {
+          setScanState(`Scan ${scan.status}`, true);
+        }
+        state.pollingHandle = setTimeout(poll, 900);
       } catch (err) {
         setScanState(`Status error: ${err.message}`);
         disableScanButton(false);
@@ -278,6 +282,15 @@
   function updateMeta(scan) {
     const started = scan.started_at ? new Date(scan.started_at).toLocaleString() : "-";
     const finished = scan.finished_at ? new Date(scan.finished_at).toLocaleString() : "-";
+
+    if ((scan.status === "running" || scan.status === "queued") && scan.progress) {
+      const progress = scan.progress;
+      const updatedAt = progress.updated_at ? new Date(progress.updated_at).toLocaleTimeString() : "-";
+      const currentPath = progress.current_path || state.config?.analyze_root || "-";
+      els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | scanned: ${progress.scanned_nodes} items (${progress.scanned_files} files, ${progress.scanned_dirs} dirs) | discovered: ${formatBytes(progress.scanned_bytes)} | current: ${shortPath(currentPath)} | updated: ${updatedAt} | started: ${started}`;
+      return;
+    }
+
     els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | started: ${started} | finished: ${finished} | nodes: ${scan.total_nodes} | total: ${formatBytes(scan.total_bytes)}`;
   }
 
@@ -296,14 +309,25 @@
     els.scanButton.disabled = disabled;
   }
 
-  function setScanState(text) {
+  function setScanState(text, running = false) {
     els.scanState.textContent = text;
+    els.scanState.classList.toggle("running", running);
   }
 
   function basename(path) {
     const cleaned = path.replace(/[\\/]+$/, "");
     const split = cleaned.split(/[\\/]/g);
     return split[split.length - 1] || path;
+  }
+
+  function shortPath(path) {
+    if (!path) {
+      return "-";
+    }
+    if (path.length <= 72) {
+      return path;
+    }
+    return `...${path.slice(-69)}`;
   }
 
   function formatBytes(bytes) {

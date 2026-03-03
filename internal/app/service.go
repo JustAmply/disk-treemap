@@ -17,13 +17,24 @@ var ErrScanRunning = errors.New("scan already running")
 
 type scannerFactory func(root string, maxConcurrency int) scan.Engine
 
+type liveProgress struct {
+	ScanID       int64
+	CurrentPath  string
+	ScannedNodes int64
+	ScannedFiles int64
+	ScannedDirs  int64
+	ScannedBytes int64
+	UpdatedAt    time.Time
+}
+
 type Service struct {
-	cfg            config.Config
-	store          *store.Store
-	makeScanner    scannerFactory
-	mu             sync.Mutex
-	running        bool
-	runningScanID  int64
+	cfg           config.Config
+	store         *store.Store
+	makeScanner   scannerFactory
+	mu            sync.Mutex
+	running       bool
+	runningScanID int64
+	progress      liveProgress
 }
 
 type ChildrenResponse struct {
@@ -68,6 +79,11 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 	}
 	s.running = true
 	s.runningScanID = scanID
+	s.progress = liveProgress{
+		ScanID:      scanID,
+		CurrentPath: s.cfg.AnalyzeRoot,
+		UpdatedAt:   time.Now().UTC(),
+	}
 	s.mu.Unlock()
 
 	go s.runScan(scanID)
@@ -96,14 +112,18 @@ func (s *Service) runScan(scanID int64) {
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, s.cfg.ScanMaxConcurrency)
 	result, scanErr := scanner.Scan(scanCtx, func(node scan.NodeRecord) error {
-		return writer.InsertNode(scanCtx, scanID, store.Node{
+		if err := writer.InsertNode(scanCtx, scanID, store.Node{
 			Path:       node.Path,
 			ParentPath: node.ParentPath,
 			Name:       node.Name,
 			Kind:       node.Kind,
 			SizeBytes:  node.SizeBytes,
 			MtimeUnix:  node.MtimeUnix,
-		})
+		}); err != nil {
+			return err
+		}
+		s.recordProgress(scanID, node)
+		return nil
 	})
 	if scanErr != nil {
 		_ = writer.Rollback()
@@ -124,6 +144,28 @@ func (s *Service) runScan(scanID int64) {
 	s.clearRunning(scanID)
 }
 
+func (s *Service) recordProgress(scanID int64, node scan.NodeRecord) {
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.running || s.runningScanID != scanID || s.progress.ScanID != scanID {
+		return
+	}
+
+	s.progress.CurrentPath = node.Path
+	s.progress.ScannedNodes++
+	s.progress.UpdatedAt = now
+
+	switch node.Kind {
+	case "file":
+		s.progress.ScannedFiles++
+		s.progress.ScannedBytes += node.SizeBytes
+	case "dir":
+		s.progress.ScannedDirs++
+	}
+}
+
 func (s *Service) finishFailure(scanID int64, scanErr error, totalBytes, totalNodes, warnings int64) {
 	_ = s.store.CompleteScan(context.Background(), scanID, "failed", time.Now().UTC(), totalBytes, totalNodes, warnings, scanErr.Error())
 	s.clearRunning(scanID)
@@ -135,15 +177,49 @@ func (s *Service) clearRunning(scanID int64) {
 	if s.running && s.runningScanID == scanID {
 		s.running = false
 		s.runningScanID = 0
+		s.progress = liveProgress{}
 	}
 }
 
 func (s *Service) GetScanRun(ctx context.Context, scanID int64) (store.ScanRun, error) {
-	return s.store.GetScanRun(ctx, scanID)
+	run, err := s.store.GetScanRun(ctx, scanID)
+	if err != nil {
+		return store.ScanRun{}, err
+	}
+	if progress := s.snapshotProgress(scanID); progress != nil {
+		run.Progress = progress
+	}
+	return run, nil
 }
 
 func (s *Service) GetLatestScanRun(ctx context.Context) (*store.ScanRun, error) {
-	return s.store.GetLatestScanRun(ctx)
+	run, err := s.store.GetLatestScanRun(ctx)
+	if err != nil || run == nil {
+		return run, err
+	}
+	if progress := s.snapshotProgress(run.ID); progress != nil {
+		run.Progress = progress
+	}
+	return run, nil
+}
+
+func (s *Service) snapshotProgress(scanID int64) *store.ScanProgress {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running || s.runningScanID != scanID || s.progress.ScanID != scanID {
+		return nil
+	}
+
+	updated := s.progress.UpdatedAt
+	return &store.ScanProgress{
+		CurrentPath:  s.progress.CurrentPath,
+		ScannedNodes: s.progress.ScannedNodes,
+		ScannedFiles: s.progress.ScannedFiles,
+		ScannedDirs:  s.progress.ScannedDirs,
+		ScannedBytes: s.progress.ScannedBytes,
+		UpdatedAt:    &updated,
+	}
 }
 
 func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath string, limit int) (ChildrenResponse, error) {

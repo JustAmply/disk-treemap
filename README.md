@@ -5,6 +5,7 @@ Lightweight WizTree-like browser UI for disk usage analysis in Docker.
 ## Features
 
 - On-demand scans only (no background indexing when idle)
+- Live scan indicator (current path, scanned items, discovered bytes)
 - Single active scan lock
 - Root path constrained by `ANALYZE_ROOT`
 - SQLite-backed scan snapshots (`/data/scan.db`)
@@ -54,7 +55,7 @@ docker compose up -d --build
 - `GET /api/v1/health`
 - `GET /api/v1/config`
 - `POST /api/v1/scans`
-- `GET /api/v1/scans/{scan_id}`
+- `GET /api/v1/scans/{scan_id}` (includes `progress` while running: current path, scanned nodes/files/dirs, scanned bytes)
 - `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>`
 - `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>`
 
@@ -85,3 +86,4 @@ The compose files include:
 - No NTFS MFT-level acceleration (filesystem walk only)
 - Symlinks are not followed
 - External authentication is expected (reverse proxy)
+
