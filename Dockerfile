@@ -2,9 +2,9 @@
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
-RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/disk-treemap ./cmd/server \
+RUN go mod download \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod -trimpath -ldflags="-s -w" -o /out/disk-treemap ./cmd/server \
     && mkdir -p /out/data
 
 # Runtime stage
