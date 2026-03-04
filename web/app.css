@@ -41,6 +41,37 @@ h2 {
   font-size: 1rem;
 }
 
+.scan-live {
+  margin-top: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #b7d7d2;
+  border-radius: 0.55rem;
+  background: #edf7f5;
+  min-width: min(64ch, 100%);
+}
+
+.scan-live-summary {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #0f4f4a;
+}
+
+.scan-live-details {
+  margin-top: 0.15rem;
+  font-size: 0.79rem;
+  color: #1f5f5a;
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+}
+
+.scan-live[data-state="queued"] {
+  background: #f4f6e8;
+  border-color: #d4dba7;
+}
+
+.scan-live[data-state="queued"] .scan-live-summary {
+  color: #5f651d;
+}
+
 .actions {
   display: flex;
   align-items: center;

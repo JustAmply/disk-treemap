@@ -3,6 +3,9 @@
     rootPath: document.getElementById("rootPath"),
     scanButton: document.getElementById("scanButton"),
     scanState: document.getElementById("scanState"),
+    scanLive: document.getElementById("scanLive"),
+    scanLiveSummary: document.getElementById("scanLiveSummary"),
+    scanLiveDetails: document.getElementById("scanLiveDetails"),
     chart: document.getElementById("chart"),
     chartHint: document.getElementById("chartHint"),
     largestTable: document.getElementById("largestTable"),
@@ -35,8 +38,10 @@
       state.activeScanId = cfg.latest_scan.id;
       if (cfg.latest_scan.status === "running" || cfg.latest_scan.status === "queued") {
         setScanState(`Scan ${cfg.latest_scan.status}`, true);
+        updateLiveStatus(cfg.latest_scan);
         startPolling(state.activeScanId);
       } else {
+        clearLiveStatus();
         updateMeta(cfg.latest_scan);
         if (cfg.latest_scan.status === "completed") {
           setScanState(`Completed (warnings: ${cfg.latest_scan.warning_count})`);
@@ -48,12 +53,16 @@
           setScanState(`Scan ${cfg.latest_scan.status}`);
         }
       }
+      return;
     }
+
+    clearLiveStatus();
   }
 
   async function runScan() {
     disableScanButton(true);
     setScanState("Starting scan...", true);
+    showPendingLiveStatus();
 
     try {
       const result = await apiPost("/api/v1/scans");
@@ -61,6 +70,7 @@
       setScanState(`Scan #${state.activeScanId} running`, true);
       startPolling(state.activeScanId);
     } catch (err) {
+      clearLiveStatus();
       disableScanButton(false);
       setScanState(`Failed: ${err.message}`);
     }
@@ -77,8 +87,10 @@
       try {
         const scan = await apiGet(`/api/v1/scans/${scanId}`);
         updateMeta(scan);
+        updateLiveStatus(scan);
 
         if (scan.status === "completed") {
+          clearLiveStatus();
           setScanState(`Completed (warnings: ${scan.warning_count})`);
           logScanWarnings(scan);
           disableScanButton(false);
@@ -89,6 +101,7 @@
         }
 
         if (scan.status === "failed") {
+          clearLiveStatus();
           setScanState(`Failed: ${scan.error || "unknown error"}`);
           disableScanButton(false);
           state.pollingHandle = null;
@@ -102,6 +115,7 @@
         }
         state.pollingHandle = setTimeout(poll, 900);
       } catch (err) {
+        clearLiveStatus();
         setScanState(`Status error: ${err.message}`);
         disableScanButton(false);
         state.pollingHandle = null;
@@ -337,6 +351,65 @@
     return `...${path.slice(-69)}`;
   }
 
+  function showPendingLiveStatus() {
+    els.scanLive.hidden = false;
+    els.scanLive.dataset.state = "queued";
+    els.scanLiveSummary.textContent = "Status: queued - waiting for first progress update";
+    els.scanLiveDetails.textContent = `Root: ${shortPath(state.config?.analyze_root || "-")}`;
+  }
+
+  function updateLiveStatus(scan) {
+    const isActive = scan.status === "running" || scan.status === "queued";
+    if (!isActive) {
+      clearLiveStatus();
+      return;
+    }
+
+    const progress = scan.progress || null;
+    const elapsed = scan.started_at ? formatElapsed(scan.started_at) : "-";
+    const scannedNodes = progress?.scanned_nodes ?? 0;
+    const scannedFiles = progress?.scanned_files ?? 0;
+    const scannedDirs = progress?.scanned_dirs ?? 0;
+    const scannedBytes = formatBytes(progress?.scanned_bytes ?? 0);
+    const currentPath = progress?.current_path || state.config?.analyze_root || "-";
+    const updatedAt = progress?.updated_at
+      ? new Date(progress.updated_at).toLocaleTimeString()
+      : "awaiting first item";
+
+    els.scanLive.hidden = false;
+    els.scanLive.dataset.state = scan.status;
+    els.scanLiveSummary.textContent = `Status: ${scan.status} - elapsed: ${elapsed} - ${scannedNodes} items (${scannedFiles} files, ${scannedDirs} dirs) - ${scannedBytes}`;
+    els.scanLiveDetails.textContent = `Current: ${shortPath(currentPath)} - Updated: ${updatedAt}`;
+  }
+
+  function clearLiveStatus() {
+    els.scanLive.hidden = true;
+    delete els.scanLive.dataset.state;
+    els.scanLiveSummary.textContent = "";
+    els.scanLiveDetails.textContent = "";
+  }
+
+  function formatElapsed(startedAtIso) {
+    const startedAt = new Date(startedAtIso).getTime();
+    if (!Number.isFinite(startedAt)) {
+      return "-";
+    }
+
+    let seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const hours = Math.floor(seconds / 3600);
+    seconds -= hours * 3600;
+    const minutes = Math.floor(seconds / 60);
+    seconds -= minutes * 60;
+
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${seconds}s`;
+    }
+    if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    }
+    return `${seconds}s`;
+  }
+
   function logScanWarnings(scan) {
     const warnings = Number(scan.warning_count || 0);
     if (warnings <= 0) {
@@ -387,4 +460,3 @@
     return body;
   }
 })();
-
