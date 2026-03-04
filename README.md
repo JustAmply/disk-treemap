@@ -24,6 +24,8 @@ Optional:
 - `LISTEN_ADDR=:8080`
 - `DATA_DIR=/data`
 - `SCAN_MAX_CONCURRENCY=4`
+- `SCAN_WRITE_BATCH_SIZE=512`
+- `SCAN_PROGRESS_INTERVAL_MS=200`
 - `SCAN_TIMEOUT=0` (seconds, `0` disables timeout)
 - `MAX_CHILDREN_PER_QUERY=500`
 
@@ -89,3 +91,4 @@ If you need stricter capabilities policy, test carefully: dropping all capabilit
 - No NTFS MFT-level acceleration (filesystem walk only)
 - Symlinks are not followed
 - External authentication is expected (reverse proxy)
+

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/justamply/disk-treemap/internal/app"
 	"github.com/justamply/disk-treemap/internal/config"
@@ -59,13 +60,15 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"analyze_root":           h.cfg.AnalyzeRoot,
-		"listen_addr":            h.cfg.ListenAddr,
-		"data_dir":               h.cfg.DataDir,
-		"scan_max_concurrency":   h.cfg.ScanMaxConcurrency,
-		"scan_timeout_seconds":   int(h.cfg.ScanTimeout.Seconds()),
-		"max_children_per_query": h.cfg.MaxChildrenPerQuery,
-		"latest_scan":            latest,
+		"analyze_root":              h.cfg.AnalyzeRoot,
+		"listen_addr":               h.cfg.ListenAddr,
+		"data_dir":                  h.cfg.DataDir,
+		"scan_max_concurrency":      h.cfg.ScanMaxConcurrency,
+		"scan_write_batch_size":     h.cfg.ScanWriteBatchSize,
+		"scan_progress_interval_ms": int(h.cfg.ScanProgressInterval / time.Millisecond),
+		"scan_timeout_seconds":      int(h.cfg.ScanTimeout.Seconds()),
+		"max_children_per_query":    h.cfg.MaxChildrenPerQuery,
+		"latest_scan":               latest,
 	})
 }
 

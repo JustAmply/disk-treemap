@@ -6,9 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
+)
+
+const (
+	sqliteMaxBindParameters = 32766
+	nodeInsertColumnCount   = 7
+	maxNodeRowsPerInsert    = sqliteMaxBindParameters / nodeInsertColumnCount
 )
 
 type Store struct {
@@ -27,6 +34,7 @@ type ScanRun struct {
 	WarningCount int64         `json:"warning_count"`
 	Progress     *ScanProgress `json:"progress,omitempty"`
 }
+
 type ScanProgress struct {
 	CurrentPath  string     `json:"current_path"`
 	ScannedNodes int64      `json:"scanned_nodes"`
@@ -46,8 +54,7 @@ type Node struct {
 }
 
 type NodeWriter struct {
-	tx   *sql.Tx
-	stmt *sql.Stmt
+	tx *sql.Tx
 }
 
 func Open(dbPath string) (*Store, error) {
@@ -145,27 +152,53 @@ func (s *Store) CompleteScan(ctx context.Context, scanID int64, status string, f
 }
 
 func (s *Store) BeginNodeWriter(ctx context.Context, scanID int64) (*NodeWriter, error) {
+	_ = scanID
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO nodes(scan_id, path, parent_path, name, kind, size_bytes, mtime_unix)
-		VALUES(?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		_ = tx.Rollback()
-		return nil, fmt.Errorf("prepare insert node: %w", err)
-	}
-
-	return &NodeWriter{tx: tx, stmt: stmt}, nil
+	return &NodeWriter{tx: tx}, nil
 }
 
 func (w *NodeWriter) InsertNode(ctx context.Context, scanID int64, node Node) error {
-	if _, err := w.stmt.ExecContext(ctx, scanID, node.Path, node.ParentPath, node.Name, node.Kind, node.SizeBytes, node.MtimeUnix); err != nil {
-		return fmt.Errorf("insert node %q: %w", node.Path, err)
+	return w.InsertNodesBatch(ctx, scanID, []Node{node})
+}
+
+func (w *NodeWriter) InsertNodesBatch(ctx context.Context, scanID int64, nodes []Node) error {
+	if len(nodes) == 0 {
+		return nil
 	}
+
+	for start := 0; start < len(nodes); start += maxNodeRowsPerInsert {
+		end := start + maxNodeRowsPerInsert
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := w.insertNodeChunk(ctx, scanID, nodes[start:end]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (w *NodeWriter) insertNodeChunk(ctx context.Context, scanID int64, nodes []Node) error {
+	var query strings.Builder
+	query.WriteString(`INSERT INTO nodes(scan_id, path, parent_path, name, kind, size_bytes, mtime_unix) VALUES `)
+
+	args := make([]any, 0, len(nodes)*nodeInsertColumnCount)
+	for i, node := range nodes {
+		if i > 0 {
+			query.WriteString(",")
+		}
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, scanID, node.Path, node.ParentPath, node.Name, node.Kind, node.SizeBytes, node.MtimeUnix)
+	}
+
+	if _, err := w.tx.ExecContext(ctx, query.String(), args...); err != nil {
+		return fmt.Errorf("insert node batch (%d): %w", len(nodes), err)
+	}
+
 	return nil
 }
 
@@ -173,18 +206,12 @@ func (w *NodeWriter) Commit() error {
 	if w == nil {
 		return nil
 	}
-	if w.stmt != nil {
-		_ = w.stmt.Close()
-	}
 	return w.tx.Commit()
 }
 
 func (w *NodeWriter) Rollback() error {
 	if w == nil {
 		return nil
-	}
-	if w.stmt != nil {
-		_ = w.stmt.Close()
 	}
 	return w.tx.Rollback()
 }

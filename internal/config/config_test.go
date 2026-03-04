@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadFromEnvRequiresAnalyzeRoot(t *testing.T) {
@@ -21,6 +22,8 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", ":9090")
 	t.Setenv("DATA_DIR", data)
 	t.Setenv("SCAN_MAX_CONCURRENCY", "8")
+	t.Setenv("SCAN_WRITE_BATCH_SIZE", "1024")
+	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "350")
 	t.Setenv("SCAN_TIMEOUT", "15")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "321")
 
@@ -41,6 +44,12 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	if cfg.ScanMaxConcurrency != 8 {
 		t.Fatalf("unexpected concurrency: %d", cfg.ScanMaxConcurrency)
 	}
+	if cfg.ScanWriteBatchSize != 1024 {
+		t.Fatalf("unexpected write batch size: %d", cfg.ScanWriteBatchSize)
+	}
+	if cfg.ScanProgressInterval != 350*time.Millisecond {
+		t.Fatalf("unexpected progress interval: %v", cfg.ScanProgressInterval)
+	}
 	if int(cfg.ScanTimeout.Seconds()) != 15 {
 		t.Fatalf("unexpected timeout: %v", cfg.ScanTimeout)
 	}
@@ -56,6 +65,8 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("ANALYZE_ROOT", root)
 	t.Setenv("SCAN_MAX_CONCURRENCY", "0")
+	t.Setenv("SCAN_WRITE_BATCH_SIZE", "0")
+	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "1")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "0")
 
 	cfg, err := LoadFromEnv()
@@ -65,6 +76,12 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 
 	if cfg.ScanMaxConcurrency != 1 {
 		t.Fatalf("expected concurrency to floor at 1, got %d", cfg.ScanMaxConcurrency)
+	}
+	if cfg.ScanWriteBatchSize != 1 {
+		t.Fatalf("expected write batch size to floor at 1, got %d", cfg.ScanWriteBatchSize)
+	}
+	if cfg.ScanProgressInterval != 10*time.Millisecond {
+		t.Fatalf("expected progress interval floor at 10ms, got %v", cfg.ScanProgressInterval)
 	}
 	if cfg.MaxChildrenPerQuery != defaultMaxChildrenPerQuery {
 		t.Fatalf("expected default max children, got %d", cfg.MaxChildrenPerQuery)

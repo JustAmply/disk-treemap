@@ -14,6 +14,8 @@ import (
 	"github.com/justamply/disk-treemap/internal/store"
 )
 
+const minProgressInterval = 10 * time.Millisecond
+
 var ErrScanRunning = errors.New("scan already running")
 
 type scannerFactory func(root string, maxConcurrency int) scan.Engine
@@ -98,10 +100,18 @@ func (s *Service) runScan(scanID int64) {
 		return
 	}
 
-	scanCtx := context.Background()
-	cancel := func() {}
+	scanCtxBase, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+
+	scanCtx := scanCtxBase
+	cancel := cancelBase
 	if s.cfg.ScanTimeout > 0 {
-		scanCtx, cancel = context.WithTimeout(context.Background(), s.cfg.ScanTimeout)
+		timeoutCtx, timeoutCancel := context.WithTimeout(scanCtxBase, s.cfg.ScanTimeout)
+		scanCtx = timeoutCtx
+		cancel = func() {
+			timeoutCancel()
+			cancelBase()
+		}
 	}
 	defer cancel()
 
@@ -111,28 +121,54 @@ func (s *Service) runScan(scanID int64) {
 		return
 	}
 
+	batchSize := s.scanWriteBatchSize()
+	progressInterval := s.scanProgressInterval()
+	queueSize := batchSize * 8
+	if queueSize < 1 {
+		queueSize = 8
+	}
+
+	nodeCh := make(chan store.Node, queueSize)
+	writerErrCh := make(chan error, 1)
+
+	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchSize, progressInterval)
+
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, s.cfg.ScanMaxConcurrency)
 	result, scanErr := scanner.Scan(scanCtx, func(node scan.NodeRecord) error {
-		if err := writer.InsertNode(scanCtx, scanID, store.Node{
+		dbNode := store.Node{
 			Path:       node.Path,
 			ParentPath: node.ParentPath,
 			Name:       node.Name,
 			Kind:       node.Kind,
 			SizeBytes:  node.SizeBytes,
 			MtimeUnix:  node.MtimeUnix,
-		}); err != nil {
-			return err
 		}
-		s.recordProgress(scanID, node)
-		return nil
+
+		select {
+		case <-scanCtx.Done():
+			return scanCtx.Err()
+		case nodeCh <- dbNode:
+			return nil
+		}
 	})
-	if scanErr == nil && isUnreadableScanResult(result) {
+
+	close(nodeCh)
+	writerErr := <-writerErrCh
+
+	if scanErr == nil && writerErr == nil && isUnreadableScanResult(result) {
 		scanErr = fmt.Errorf("scan found no readable files under %q (warnings: %d); check mount and permissions", s.cfg.AnalyzeRoot, result.WarningCount)
 	}
+
 	if scanErr != nil {
 		_ = writer.Rollback()
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, scanErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
 		s.finishFailure(scanID, scanErr, 0, 0, result.WarningCount)
+		return
+	}
+	if writerErr != nil {
+		_ = writer.Rollback()
+		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, writerErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
+		s.finishFailure(scanID, fmt.Errorf("write nodes: %w", writerErr), 0, 0, result.WarningCount)
 		return
 	}
 
@@ -150,8 +186,73 @@ func (s *Service) runScan(scanID int64) {
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 }
 
-func (s *Service) recordProgress(scanID int64, node scan.NodeRecord) {
-	now := time.Now().UTC()
+func (s *Service) runNodeWriter(
+	ctx context.Context,
+	scanID int64,
+	writer *store.NodeWriter,
+	nodeCh <-chan store.Node,
+	writerErrCh chan<- error,
+	batchSize int,
+	progressInterval time.Duration,
+) {
+	ticker := time.NewTicker(progressInterval)
+	defer ticker.Stop()
+
+	batch := make([]store.Node, 0, batchSize)
+	flush := func(now time.Time) error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := writer.InsertNodesBatch(ctx, scanID, batch); err != nil {
+			return err
+		}
+		s.recordProgressBatch(scanID, batch, now)
+		batch = batch[:0]
+		return nil
+	}
+
+	for {
+		select {
+		case node, ok := <-nodeCh:
+			if !ok {
+				writerErrCh <- flush(time.Now().UTC())
+				return
+			}
+			batch = append(batch, node)
+			if len(batch) >= batchSize {
+				if err := flush(time.Now().UTC()); err != nil {
+					writerErrCh <- err
+					return
+				}
+			}
+		case tickAt := <-ticker.C:
+			if err := flush(tickAt.UTC()); err != nil {
+				writerErrCh <- err
+				return
+			}
+		case <-ctx.Done():
+			writerErrCh <- ctx.Err()
+			return
+		}
+	}
+}
+
+func (s *Service) recordProgressBatch(scanID int64, batch []store.Node, updatedAt time.Time) {
+	var nodes int64
+	var files int64
+	var dirs int64
+	var bytes int64
+
+	for _, node := range batch {
+		nodes++
+		switch node.Kind {
+		case "file":
+			files++
+			bytes += node.SizeBytes
+		case "dir":
+			dirs++
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -159,17 +260,26 @@ func (s *Service) recordProgress(scanID int64, node scan.NodeRecord) {
 		return
 	}
 
-	s.progress.CurrentPath = node.Path
-	s.progress.ScannedNodes++
-	s.progress.UpdatedAt = now
+	s.progress.CurrentPath = batch[len(batch)-1].Path
+	s.progress.ScannedNodes += nodes
+	s.progress.ScannedFiles += files
+	s.progress.ScannedDirs += dirs
+	s.progress.ScannedBytes += bytes
+	s.progress.UpdatedAt = updatedAt
+}
 
-	switch node.Kind {
-	case "file":
-		s.progress.ScannedFiles++
-		s.progress.ScannedBytes += node.SizeBytes
-	case "dir":
-		s.progress.ScannedDirs++
+func (s *Service) scanWriteBatchSize() int {
+	if s.cfg.ScanWriteBatchSize < 1 {
+		return 1
 	}
+	return s.cfg.ScanWriteBatchSize
+}
+
+func (s *Service) scanProgressInterval() time.Duration {
+	if s.cfg.ScanProgressInterval < minProgressInterval {
+		return minProgressInterval
+	}
+	return s.cfg.ScanProgressInterval
 }
 
 func (s *Service) finishFailure(scanID int64, scanErr error, totalBytes, totalNodes, warnings int64) {

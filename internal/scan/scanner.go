@@ -49,19 +49,12 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return Result{}, errors.New("node callback is required")
 	}
 
-	var cbMu sync.Mutex
-	safeEmit := func(node NodeRecord) error {
-		cbMu.Lock()
-		defer cbMu.Unlock()
-		return cb(node)
-	}
-
 	var sem chan struct{}
 	if s.maxConcurrency > 1 {
 		sem = make(chan struct{}, s.maxConcurrency-1)
 	}
 
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", sem, safeEmit)
+	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", sem, cb)
 	if err != nil {
 		return Result{}, err
 	}

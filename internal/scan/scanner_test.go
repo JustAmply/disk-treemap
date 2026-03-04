@@ -2,10 +2,13 @@ package scan
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestScannerComputesDirectorySizesAndSkipsSymlinks(t *testing.T) {
@@ -73,6 +76,41 @@ func TestScannerPermissionDeniedIsNonFatal(t *testing.T) {
 	}
 	if result.WarningCount == 0 {
 		t.Skip("environment did not produce a permission warning")
+	}
+}
+
+func TestScannerAllowsConcurrentCallbacks(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 64; i++ {
+		writeSizedFile(t, filepath.Join(root, fmt.Sprintf("file-%d.bin", i)), 1)
+	}
+
+	var current int32
+	var maxSeen int32
+
+	s := New(root, 16)
+	_, err := s.Scan(context.Background(), func(node NodeRecord) error {
+		n := atomic.AddInt32(&current, 1)
+		for {
+			m := atomic.LoadInt32(&maxSeen)
+			if n <= m {
+				break
+			}
+			if atomic.CompareAndSwapInt32(&maxSeen, m, n) {
+				break
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+		atomic.AddInt32(&current, -1)
+		_ = node
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if maxSeen < 2 {
+		t.Fatalf("expected concurrent callbacks, max concurrency observed=%d", maxSeen)
 	}
 }
 

@@ -14,6 +14,9 @@ const (
 	defaultListenAddr          = ":8080"
 	defaultDataDir             = "/data"
 	defaultScanMaxConcurrency  = 4
+	defaultScanWriteBatchSize  = 512
+	defaultScanProgressMS      = 200
+	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500
 )
 
@@ -22,17 +25,21 @@ type Config struct {
 	ListenAddr           string
 	DataDir              string
 	ScanMaxConcurrency   int
+	ScanWriteBatchSize   int
+	ScanProgressInterval time.Duration
 	ScanTimeout          time.Duration
 	MaxChildrenPerQuery  int
 }
 
 func LoadFromEnv() (Config, error) {
 	cfg := Config{
-		AnalyzeRoot:         os.Getenv("ANALYZE_ROOT"),
-		ListenAddr:          getenvDefault("LISTEN_ADDR", defaultListenAddr),
-		DataDir:             getenvDefault("DATA_DIR", defaultDataDir),
-		ScanMaxConcurrency:  defaultScanMaxConcurrency,
-		MaxChildrenPerQuery: defaultMaxChildrenPerQuery,
+		AnalyzeRoot:          os.Getenv("ANALYZE_ROOT"),
+		ListenAddr:           getenvDefault("LISTEN_ADDR", defaultListenAddr),
+		DataDir:              getenvDefault("DATA_DIR", defaultDataDir),
+		ScanMaxConcurrency:   defaultScanMaxConcurrency,
+		ScanWriteBatchSize:   defaultScanWriteBatchSize,
+		ScanProgressInterval: time.Duration(defaultScanProgressMS) * time.Millisecond,
+		MaxChildrenPerQuery:  defaultMaxChildrenPerQuery,
 	}
 
 	if cfg.AnalyzeRoot == "" {
@@ -50,6 +57,23 @@ func LoadFromEnv() (Config, error) {
 	if cfg.ScanMaxConcurrency < 1 {
 		cfg.ScanMaxConcurrency = 1
 	}
+
+	cfg.ScanWriteBatchSize, err = parseIntEnv("SCAN_WRITE_BATCH_SIZE", defaultScanWriteBatchSize)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.ScanWriteBatchSize < 1 {
+		cfg.ScanWriteBatchSize = 1
+	}
+
+	progressMS, err := parseIntEnv("SCAN_PROGRESS_INTERVAL_MS", defaultScanProgressMS)
+	if err != nil {
+		return Config{}, err
+	}
+	if progressMS < minScanProgressMS {
+		progressMS = minScanProgressMS
+	}
+	cfg.ScanProgressInterval = time.Duration(progressMS) * time.Millisecond
 
 	timeoutSeconds, err := parseIntEnv("SCAN_TIMEOUT", 0)
 	if err != nil {

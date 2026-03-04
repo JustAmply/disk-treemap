@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,10 +21,12 @@ func TestChildrenRejectsPathOutsideRoot(t *testing.T) {
 	dataDir := t.TempDir()
 
 	cfg := config.Config{
-		AnalyzeRoot:         root,
-		DataDir:             dataDir,
-		ScanMaxConcurrency:  2,
-		MaxChildrenPerQuery: 100,
+		AnalyzeRoot:          root,
+		DataDir:              dataDir,
+		ScanMaxConcurrency:   2,
+		ScanWriteBatchSize:   8,
+		ScanProgressInterval: 25 * time.Millisecond,
+		MaxChildrenPerQuery:  100,
 	}
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
@@ -78,5 +81,53 @@ func TestChildrenRejectsPathOutsideRoot(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConfigIncludesScanWriteFields(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := config.Config{
+		AnalyzeRoot:          root,
+		DataDir:              dataDir,
+		ScanMaxConcurrency:   4,
+		ScanWriteBatchSize:   256,
+		ScanProgressInterval: 125 * time.Millisecond,
+		MaxChildrenPerQuery:  500,
+	}
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if got := int(payload["scan_write_batch_size"].(float64)); got != 256 {
+		t.Fatalf("expected batch size 256, got %d", got)
+	}
+	if got := int(payload["scan_progress_interval_ms"].(float64)); got != 125 {
+		t.Fatalf("expected progress interval 125ms, got %d", got)
 	}
 }
