@@ -347,3 +347,97 @@ func waitForScanStatusViaService(t *testing.T, svc *Service, scanID int64) store
 	t.Fatalf("scan did not complete in time")
 	return store.ScanRun{}
 }
+
+type singleNodeScanner struct {
+	root string
+}
+
+func (s *singleNodeScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
+	if err := cb(scan.NodeRecord{
+		Path:       s.root,
+		ParentPath: "",
+		Name:       filepath.Base(s.root),
+		Kind:       "dir",
+		SizeBytes:  1,
+		MtimeUnix:  time.Now().Unix(),
+	}); err != nil {
+		return scan.Result{}, err
+	}
+	return scan.Result{TotalBytes: 1, TotalNodes: 1}, nil
+}
+
+func TestServicePrunesCompletedHistoryAfterScan(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	cfg.ScanHistoryMaxRuns = 2
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		scanID, err := st.CreateScanRun(context.Background(), root)
+		if err != nil {
+			t.Fatalf("create scan run: %v", err)
+		}
+		if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
+			t.Fatalf("mark running: %v", err)
+		}
+		writer, err := st.BeginNodeWriter(context.Background(), scanID)
+		if err != nil {
+			t.Fatalf("begin writer: %v", err)
+		}
+		if err := writer.InsertNode(context.Background(), scanID, store.Node{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: int64(i + 1)}); err != nil {
+			_ = writer.Rollback()
+			t.Fatalf("insert node: %v", err)
+		}
+		if err := writer.Commit(); err != nil {
+			t.Fatalf("commit nodes: %v", err)
+		}
+		if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), int64(i+1), 1, 0, ""); err != nil {
+			t.Fatalf("complete scan: %v", err)
+		}
+	}
+
+	svc := NewService(cfg, st)
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &singleNodeScanner{root: root}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	run := waitForScanStatus(t, st, scanID)
+	if run.Status != "completed" {
+		t.Fatalf("expected completed, got %s", run.Status)
+	}
+
+	runs, err := svc.ListScans(context.Background(), 10, "completed")
+	if err != nil {
+		t.Fatalf("list scans: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 completed scans after prune, got %d", len(runs))
+	}
+}
+
+func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
+	_, err := normalizeNodeQueryOptions(NodeQueryOptions{Kind: "wat"}, 10, "size_desc")
+	if err == nil {
+		t.Fatalf("expected error for invalid type")
+	}
+
+	_, err = normalizeNodeQueryOptions(NodeQueryOptions{Sort: "wat"}, 10, "size_desc")
+	if err == nil {
+		t.Fatalf("expected error for invalid sort")
+	}
+}

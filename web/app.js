@@ -12,6 +12,28 @@
     breadcrumb: document.getElementById("breadcrumb"),
     scanMeta: document.getElementById("scanMeta"),
     tooltip: document.getElementById("tooltip"),
+    historyTable: document.getElementById("historyTable"),
+    refreshHistoryButton: document.getElementById("refreshHistoryButton"),
+    compareBaseSelect: document.getElementById("compareBaseSelect"),
+    clearCompareButton: document.getElementById("clearCompareButton"),
+    searchInput: document.getElementById("searchInput"),
+    typeFilter: document.getElementById("typeFilter"),
+    minSizeInput: document.getElementById("minSizeInput"),
+    sortSelect: document.getElementById("sortSelect"),
+    applyFiltersButton: document.getElementById("applyFiltersButton"),
+    resetFiltersButton: document.getElementById("resetFiltersButton"),
+    diffPanel: document.getElementById("diffPanel"),
+    diffMeta: document.getElementById("diffMeta"),
+    diffEmpty: document.getElementById("diffEmpty"),
+    growthTable: document.getElementById("growthTable"),
+    shrinkTable: document.getElementById("shrinkTable"),
+  };
+
+  const defaultFilters = {
+    q: "",
+    type: "",
+    minSize: 0,
+    sort: "size_desc",
   };
 
   const state = {
@@ -19,6 +41,10 @@
     activeScanId: null,
     currentPath: null,
     pollingHandle: null,
+    historyItems: [],
+    baseScanId: null,
+    filters: { ...defaultFilters },
+    urlState: readUrlState(),
   };
 
   init().catch((err) => {
@@ -26,37 +52,138 @@
   });
 
   async function init() {
-    els.scanButton.addEventListener("click", runScan);
+    bindEvents();
 
     const cfg = await apiGet("/api/v1/config");
     state.config = cfg;
-    state.currentPath = cfg.analyze_root;
+    state.currentPath = state.urlState.path || cfg.analyze_root;
+
+    state.filters = {
+      q: state.urlState.q || "",
+      type: state.urlState.type || "",
+      minSize: state.urlState.minSize || 0,
+      sort: state.urlState.sort || "size_desc",
+    };
+    syncFilterInputs();
 
     els.rootPath.textContent = `Root: ${cfg.analyze_root}`;
 
-    if (cfg.latest_scan) {
-      state.activeScanId = cfg.latest_scan.id;
-      if (cfg.latest_scan.status === "running" || cfg.latest_scan.status === "queued") {
-        setScanState(`Scan ${cfg.latest_scan.status}`, true);
-        updateLiveStatus(cfg.latest_scan);
-        startPolling(state.activeScanId);
-      } else {
-        clearLiveStatus();
-        updateMeta(cfg.latest_scan);
-        if (cfg.latest_scan.status === "completed") {
-          setScanState(`Completed (warnings: ${cfg.latest_scan.warning_count})`);
-          logScanWarnings(cfg.latest_scan);
-          await loadPath(state.currentPath);
-        } else if (cfg.latest_scan.status === "failed") {
-          setScanState(`Failed: ${cfg.latest_scan.error || "unknown error"}`);
-        } else {
-          setScanState(`Scan ${cfg.latest_scan.status}`);
-        }
-      }
+    await loadHistory();
+
+    const desiredScanId = state.urlState.scanId || cfg.latest_scan?.id || state.historyItems[0]?.id || null;
+    if (!desiredScanId) {
+      setScanState("No scans yet");
+      clearLiveStatus();
+      renderDiff(null);
       return;
     }
 
+    state.baseScanId = state.urlState.baseScanId;
+    await openScan(desiredScanId, { preservePath: true });
+  }
+
+  function bindEvents() {
+    els.scanButton.addEventListener("click", runScan);
+    els.refreshHistoryButton.addEventListener("click", () => {
+      loadHistory().catch((err) => setScanState(`History error: ${err.message}`));
+    });
+    els.compareBaseSelect.addEventListener("change", () => {
+      const value = Number(els.compareBaseSelect.value || 0);
+      state.baseScanId = value > 0 ? value : null;
+      if (!state.activeScanId || !state.currentPath) {
+        syncUrlState();
+        renderDiff(null);
+        return;
+      }
+      loadPath(state.currentPath).catch((err) => setScanState(`Diff error: ${err.message}`));
+    });
+    els.clearCompareButton.addEventListener("click", () => {
+      state.baseScanId = null;
+      els.compareBaseSelect.value = "";
+      syncUrlState();
+      renderDiff(null);
+    });
+
+    els.applyFiltersButton.addEventListener("click", applyFilters);
+    els.resetFiltersButton.addEventListener("click", () => {
+      state.filters = { ...defaultFilters };
+      syncFilterInputs();
+      if (state.activeScanId && state.currentPath) {
+        loadPath(state.currentPath).catch((err) => setScanState(`Load error: ${err.message}`));
+      }
+      syncUrlState();
+    });
+    els.searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        applyFilters();
+      }
+    });
+  }
+
+  function applyFilters() {
+    state.filters = {
+      q: (els.searchInput.value || "").trim(),
+      type: (els.typeFilter.value || "").trim(),
+      minSize: Math.max(0, Number.parseInt(els.minSizeInput.value || "0", 10) || 0),
+      sort: (els.sortSelect.value || "size_desc").trim(),
+    };
+
+    if (state.activeScanId && state.currentPath) {
+      loadPath(state.currentPath).catch((err) => setScanState(`Load error: ${err.message}`));
+    }
+    syncUrlState();
+  }
+
+  async function loadHistory() {
+    const payload = await apiGet("/api/v1/scans?limit=200");
+    state.historyItems = payload.items || [];
+    renderHistory();
+    renderCompareOptions();
+  }
+
+  async function openScan(scanId, { preservePath = false } = {}) {
+    const selected = state.historyItems.find((item) => item.id === scanId);
+    if (!selected) {
+      throw new Error(`scan #${scanId} not found`);
+    }
+
+    state.activeScanId = scanId;
+    renderHistory();
+    renderCompareOptions();
+    syncUrlState();
+
+    updateMeta(selected);
+
+    if (selected.status === "running" || selected.status === "queued") {
+      setScanState(`Scan ${selected.status}`, true);
+      updateLiveStatus(selected);
+      startPolling(scanId);
+      return;
+    }
+
+    if (state.pollingHandle) {
+      clearTimeout(state.pollingHandle);
+      state.pollingHandle = null;
+    }
+
     clearLiveStatus();
+    disableScanButton(false);
+
+    if (selected.status === "failed") {
+      setScanState(`Failed: ${selected.error || "unknown error"}`);
+      renderDiff(null);
+      return;
+    }
+
+    if (selected.status === "completed") {
+      setScanState(`Completed (warnings: ${selected.warning_count || 0})`);
+      const targetPath = preservePath && state.currentPath ? state.currentPath : state.config.analyze_root;
+      await loadPath(targetPath);
+      return;
+    }
+
+    setScanState(`Scan ${selected.status}`);
   }
 
   async function runScan() {
@@ -67,8 +194,11 @@
     try {
       const result = await apiPost("/api/v1/scans");
       state.activeScanId = result.scan_id;
+      state.currentPath = state.config.analyze_root;
       setScanState(`Scan #${state.activeScanId} running`, true);
+      await loadHistory();
       startPolling(state.activeScanId);
+      syncUrlState();
     } catch (err) {
       clearLiveStatus();
       disableScanButton(false);
@@ -86,15 +216,16 @@
     const poll = async () => {
       try {
         const scan = await apiGet(`/api/v1/scans/${scanId}`);
+        upsertHistoryScan(scan);
         updateMeta(scan);
         updateLiveStatus(scan);
 
         if (scan.status === "completed") {
           clearLiveStatus();
           setScanState(`Completed (warnings: ${scan.warning_count})`);
-          logScanWarnings(scan);
           disableScanButton(false);
           state.pollingHandle = null;
+          await loadHistory();
           state.currentPath = state.config.analyze_root;
           await loadPath(state.currentPath);
           return;
@@ -105,6 +236,7 @@
           setScanState(`Failed: ${scan.error || "unknown error"}`);
           disableScanButton(false);
           state.pollingHandle = null;
+          await loadHistory();
           return;
         }
 
@@ -125,20 +257,57 @@
     state.pollingHandle = setTimeout(poll, 250);
   }
 
+  function upsertHistoryScan(scan) {
+    const index = state.historyItems.findIndex((item) => item.id === scan.id);
+    if (index >= 0) {
+      state.historyItems[index] = scan;
+    } else {
+      state.historyItems.unshift(scan);
+    }
+    renderHistory();
+    renderCompareOptions();
+  }
+
   async function loadPath(path) {
     if (!state.activeScanId) {
       return;
     }
 
-    const [children, largest] = await Promise.all([
-      apiGet(`/api/v1/scans/${state.activeScanId}/children?path=${encodeURIComponent(path)}`),
-      apiGet(`/api/v1/scans/${state.activeScanId}/largest?path=${encodeURIComponent(path)}&limit=100`),
-    ]);
+    const selected = state.historyItems.find((item) => item.id === state.activeScanId);
+    if (!selected || selected.status !== "completed") {
+      return;
+    }
+
+    const query = new URLSearchParams({
+      path,
+      limit: "150",
+      q: state.filters.q,
+      type: state.filters.type,
+      min_size: String(state.filters.minSize),
+      sort: state.filters.sort,
+    });
+
+    const childrenPromise = apiGet(`/api/v1/scans/${state.activeScanId}/children?${query.toString()}`);
+    const largestPromise = apiGet(`/api/v1/scans/${state.activeScanId}/largest?${query.toString()}`);
+
+    let diffPromise = Promise.resolve(null);
+    if (state.baseScanId && state.baseScanId !== state.activeScanId) {
+      const diffQuery = new URLSearchParams({
+        base_scan_id: String(state.baseScanId),
+        path,
+        limit: "100",
+      });
+      diffPromise = apiGet(`/api/v1/scans/${state.activeScanId}/diff?${diffQuery.toString()}`);
+    }
+
+    const [children, largest, diff] = await Promise.all([childrenPromise, largestPromise, diffPromise]);
 
     state.currentPath = children.path;
     renderBreadcrumb(children.path);
     renderTreemap(children);
     renderLargest(largest.items);
+    renderDiff(diff);
+    syncUrlState();
   }
 
   function renderTreemap(childrenResponse) {
@@ -147,7 +316,7 @@
     const items = childrenResponse.children || [];
     if (items.length === 0) {
       els.chartHint.hidden = false;
-      els.chartHint.textContent = "No child items at this path.";
+      els.chartHint.textContent = "No child items at this path for current filters.";
       return;
     }
 
@@ -201,9 +370,10 @@
         }
       })
       .on("mousemove", (event, d) => {
-        const percent = childrenResponse.total_bytes > 0
-          ? ((d.value / childrenResponse.total_bytes) * 100).toFixed(2)
-          : "0.00";
+        const percent =
+          childrenResponse.total_bytes > 0
+            ? ((d.value / childrenResponse.total_bytes) * 100).toFixed(2)
+            : "0.00";
         showTooltip(event.clientX, event.clientY, [
           `<strong>${escapeHtml(d.data.name)}</strong>`,
           d.data.path,
@@ -229,7 +399,7 @@
   function renderLargest(items) {
     els.largestTable.innerHTML = "";
 
-    for (const item of items) {
+    for (const item of items || []) {
       const tr = document.createElement("tr");
 
       const nameTd = document.createElement("td");
@@ -256,6 +426,62 @@
     }
   }
 
+  function renderDiff(diff) {
+    els.growthTable.innerHTML = "";
+    els.shrinkTable.innerHTML = "";
+
+    if (!diff || !state.baseScanId || state.baseScanId === state.activeScanId) {
+      els.diffPanel.hidden = true;
+      return;
+    }
+
+    const items = diff.items || [];
+    const growth = items
+      .filter((item) => item.delta_bytes > 0)
+      .sort((a, b) => b.delta_bytes - a.delta_bytes)
+      .slice(0, 10);
+    const shrink = items
+      .filter((item) => item.delta_bytes < 0)
+      .sort((a, b) => a.delta_bytes - b.delta_bytes)
+      .slice(0, 10);
+
+    els.diffPanel.hidden = false;
+    els.diffMeta.textContent = `Base #${diff.base_scan_id} -> Target #${diff.target_scan_id} at ${diff.path}`;
+
+    const renderRow = (table, item, cssClass = "") => {
+      const tr = document.createElement("tr");
+      const nameTd = document.createElement("td");
+      const nameLink = document.createElement("a");
+      nameLink.href = "#";
+      nameLink.className = `cell-link ${cssClass}`.trim();
+      nameLink.textContent = item.name;
+      nameLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        loadPath(item.path).catch((err) => setScanState(`Navigation error: ${err.message}`));
+      });
+      nameTd.appendChild(nameLink);
+
+      const deltaTd = document.createElement("td");
+      deltaTd.textContent = formatSignedBytes(item.delta_bytes);
+
+      const pctTd = document.createElement("td");
+      pctTd.textContent = `${item.delta_percent.toFixed(2)}%`;
+
+      tr.append(nameTd, deltaTd, pctTd);
+      table.appendChild(tr);
+    };
+
+    for (const item of growth) {
+      renderRow(els.growthTable, item);
+    }
+    for (const item of shrink) {
+      renderRow(els.shrinkTable, item, "warn");
+    }
+
+    const hasRows = growth.length > 0 || shrink.length > 0;
+    els.diffEmpty.hidden = hasRows;
+  }
+
   function renderBreadcrumb(currentPath) {
     els.breadcrumb.innerHTML = "";
 
@@ -268,6 +494,99 @@
         loadPath(part.path).catch((err) => setScanState(`Navigation error: ${err.message}`));
       });
       els.breadcrumb.appendChild(button);
+    }
+  }
+
+  function renderHistory() {
+    els.historyTable.innerHTML = "";
+
+    for (const scan of state.historyItems) {
+      const tr = document.createElement("tr");
+      if (scan.id === state.activeScanId) {
+        tr.style.background = "#f1f7f6";
+      }
+
+      const idTd = document.createElement("td");
+      idTd.textContent = `#${scan.id}`;
+
+      const statusTd = document.createElement("td");
+      const duration = formatScanDuration(scan);
+      statusTd.textContent = `${scan.status} (${duration})`;
+
+      const totalTd = document.createElement("td");
+      totalTd.textContent = formatBytes(scan.total_bytes || 0);
+
+      const actionsTd = document.createElement("td");
+      const openButton = document.createElement("button");
+      openButton.type = "button";
+      openButton.textContent = "Open";
+      openButton.className = "secondary";
+      openButton.addEventListener("click", () => {
+        openScan(scan.id).catch((err) => setScanState(`Open scan error: ${err.message}`));
+      });
+
+      actionsTd.appendChild(openButton);
+
+      if (scan.status !== "running" && scan.status !== "queued") {
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.textContent = "Delete";
+        deleteButton.className = "secondary";
+        deleteButton.style.marginLeft = "0.35rem";
+        deleteButton.addEventListener("click", async () => {
+          try {
+            await apiDelete(`/api/v1/scans/${scan.id}`);
+            await loadHistory();
+
+            if (scan.id === state.activeScanId) {
+              const nextId = state.historyItems[0]?.id || null;
+              if (nextId) {
+                await openScan(nextId, { preservePath: false });
+              } else {
+                state.activeScanId = null;
+                state.currentPath = state.config.analyze_root;
+                els.chart.innerHTML = "";
+                els.largestTable.innerHTML = "";
+                renderDiff(null);
+                setScanState("No scans yet");
+              }
+            }
+          } catch (err) {
+            setScanState(`Delete failed: ${err.message}`);
+          }
+        });
+        actionsTd.appendChild(deleteButton);
+      }
+
+      tr.append(idTd, statusTd, totalTd, actionsTd);
+      els.historyTable.appendChild(tr);
+    }
+  }
+
+  function renderCompareOptions() {
+    const previousValue = String(state.baseScanId || "");
+    els.compareBaseSelect.innerHTML = "";
+
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "None";
+    els.compareBaseSelect.appendChild(none);
+
+    const completed = state.historyItems.filter((item) => item.status === "completed" && item.id !== state.activeScanId);
+    for (const scan of completed) {
+      const option = document.createElement("option");
+      option.value = String(scan.id);
+      option.textContent = `#${scan.id} (${formatBytes(scan.total_bytes || 0)})`;
+      els.compareBaseSelect.appendChild(option);
+    }
+
+    const hasSelected = completed.some((item) => String(item.id) === previousValue);
+    if (hasSelected) {
+      state.baseScanId = Number(previousValue);
+      els.compareBaseSelect.value = previousValue;
+    } else {
+      state.baseScanId = null;
+      els.compareBaseSelect.value = "";
     }
   }
 
@@ -333,6 +652,68 @@
   function setScanState(text, running = false) {
     els.scanState.textContent = text;
     els.scanState.classList.toggle("running", running);
+  }
+
+  function syncFilterInputs() {
+    els.searchInput.value = state.filters.q;
+    els.typeFilter.value = state.filters.type;
+    els.minSizeInput.value = String(state.filters.minSize || 0);
+    els.sortSelect.value = state.filters.sort || "size_desc";
+  }
+
+  function syncUrlState() {
+    const params = new URLSearchParams();
+    if (state.activeScanId) {
+      params.set("scan", String(state.activeScanId));
+    }
+    if (state.currentPath) {
+      params.set("path", state.currentPath);
+    }
+    if (state.baseScanId) {
+      params.set("base_scan", String(state.baseScanId));
+    }
+    if (state.filters.q) {
+      params.set("q", state.filters.q);
+    }
+    if (state.filters.type) {
+      params.set("type", state.filters.type);
+    }
+    if (state.filters.minSize > 0) {
+      params.set("min_size", String(state.filters.minSize));
+    }
+    if (state.filters.sort && state.filters.sort !== "size_desc") {
+      params.set("sort", state.filters.sort);
+    }
+
+    const query = params.toString();
+    const newUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+    window.history.replaceState({}, "", newUrl);
+  }
+
+  function readUrlState() {
+    const params = new URLSearchParams(window.location.search);
+    const scanId = parsePositiveInt(params.get("scan"));
+    const baseScanId = parsePositiveInt(params.get("base_scan"));
+    const minSize = Math.max(0, parsePositiveInt(params.get("min_size")) || 0);
+    const sort = params.get("sort") || "size_desc";
+
+    return {
+      scanId,
+      baseScanId,
+      path: params.get("path") || null,
+      q: (params.get("q") || "").trim(),
+      type: (params.get("type") || "").trim(),
+      minSize,
+      sort,
+    };
+  }
+
+  function parsePositiveInt(value) {
+    const parsed = Number.parseInt(value || "", 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+    return parsed;
   }
 
   function basename(path) {
@@ -410,12 +791,22 @@
     return `${seconds}s`;
   }
 
-  function logScanWarnings(scan) {
-    const warnings = Number(scan.warning_count || 0);
-    if (warnings <= 0) {
-      return;
+  function formatScanDuration(scan) {
+    if (!scan.started_at) {
+      return "-";
     }
-    console.warn(`Scan #${scan.id} completed with ${warnings} warning(s). Check server logs for permission/path details.`);
+    const started = new Date(scan.started_at).getTime();
+    const finished = scan.finished_at ? new Date(scan.finished_at).getTime() : Date.now();
+    if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) {
+      return "-";
+    }
+    const seconds = Math.floor((finished - started) / 1000);
+    if (seconds < 60) {
+      return `${seconds}s`;
+    }
+    const minutes = Math.floor(seconds / 60);
+    const rem = seconds % 60;
+    return `${minutes}m ${rem}s`;
   }
 
   function formatBytes(bytes) {
@@ -431,6 +822,14 @@
       unit += 1;
     }
     return `${size.toFixed(2)} ${units[unit]}`;
+  }
+
+  function formatSignedBytes(bytes) {
+    if (bytes === 0) {
+      return "0 B";
+    }
+    const prefix = bytes > 0 ? "+" : "-";
+    return `${prefix}${formatBytes(Math.abs(bytes))}`;
   }
 
   function escapeHtml(value) {
@@ -458,5 +857,16 @@
       throw new Error(body.error || `POST ${url} failed`);
     }
     return body;
+  }
+
+  async function apiDelete(url) {
+    const response = await fetch(url, { method: "DELETE" });
+    if (response.status === 204) {
+      return;
+    }
+    const body = await response.json();
+    if (!response.ok) {
+      throw new Error(body.error || `DELETE ${url} failed`);
+    }
   }
 })();

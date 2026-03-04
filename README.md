@@ -9,7 +9,11 @@ Lightweight WizTree-like browser UI for disk usage analysis in Docker.
 - Single active scan lock
 - Root path constrained by `ANALYZE_ROOT`
 - SQLite-backed scan snapshots (`/data/scan.db`)
+- Scan history list with manual deletion and automatic retention cap
+- Directory-level scan diff (growth/shrink/new/removed)
 - Treemap UI + largest-items table + breadcrumb drilldown
+- Search/filter/sort on children and largest views
+- URL state for deep-linking (`scan`, `path`, `base_scan`, filters)
 - Distroless runtime image
 - Runs as root in-container for broader read access while scanning bind-mounted paths
 
@@ -28,6 +32,7 @@ Optional:
 - `SCAN_PROGRESS_INTERVAL_MS=200`
 - `SCAN_TIMEOUT=0` (seconds, `0` disables timeout)
 - `MAX_CHILDREN_PER_QUERY=500`
+- `SCAN_HISTORY_MAX_RUNS=50` (retains newest completed/failed scans)
 
 ## Run with Docker
 
@@ -59,14 +64,26 @@ docker compose up -d --build
 - `GET /api/v1/health`
 - `GET /api/v1/config`
 - `POST /api/v1/scans`
-- `GET /api/v1/scans/{scan_id}` (includes `progress` while running: current path, scanned nodes/files/dirs, scanned bytes)
-- `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>`
-- `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>`
+- `GET /api/v1/scans?limit=<n>&status=<queued|running|completed|failed>`
+- `GET /api/v1/scans/{scan_id}`
+- `DELETE /api/v1/scans/{scan_id}`
+- `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
+- `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
+- `GET /api/v1/scans/{target_scan_id}/diff?base_scan_id=<scan_id>&path=<absolute-path>&limit=<n>`
+
+Diff response fields per directory item:
+
+- `before_bytes`
+- `after_bytes`
+- `delta_bytes`
+- `delta_percent`
+- `change_class` (`new`, `grew`, `shrunk`, `removed`, `unchanged`)
 
 Notes:
 
 - `path` must be absolute and inside `ANALYZE_ROOT`.
-- Children are sorted by `size_bytes DESC, name ASC`.
+- Children/largest sorting defaults to `size_desc`.
+- Diff compares direct child directories at the requested path.
 
 ## Local Development
 
@@ -91,4 +108,4 @@ If you need stricter capabilities policy, test carefully: dropping all capabilit
 - No NTFS MFT-level acceleration (filesystem walk only)
 - Symlinks are not followed
 - External authentication is expected (reverse proxy)
-
+- Diff is directory-level in this version (not file-level)

@@ -26,6 +26,7 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "350")
 	t.Setenv("SCAN_TIMEOUT", "15")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "321")
+	t.Setenv("SCAN_HISTORY_MAX_RUNS", "99")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -56,6 +57,9 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	if cfg.MaxChildrenPerQuery != 321 {
 		t.Fatalf("unexpected max children: %d", cfg.MaxChildrenPerQuery)
 	}
+	if cfg.ScanHistoryMaxRuns != 99 {
+		t.Fatalf("unexpected history max runs: %d", cfg.ScanHistoryMaxRuns)
+	}
 	if got, want := cfg.DatabasePath(), filepath.Join(data, "scan.db"); got != want {
 		t.Fatalf("unexpected database path: got %q want %q", got, want)
 	}
@@ -68,6 +72,7 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	t.Setenv("SCAN_WRITE_BATCH_SIZE", "0")
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "1")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "0")
+	t.Setenv("SCAN_HISTORY_MAX_RUNS", "0")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -85,5 +90,8 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	}
 	if cfg.MaxChildrenPerQuery != defaultMaxChildrenPerQuery {
 		t.Fatalf("expected default max children, got %d", cfg.MaxChildrenPerQuery)
+	}
+	if cfg.ScanHistoryMaxRuns != defaultScanHistoryMaxRuns {
+		t.Fatalf("expected default scan history max runs, got %d", cfg.ScanHistoryMaxRuns)
 	}
 }

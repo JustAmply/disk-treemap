@@ -16,7 +16,10 @@ import (
 
 const minProgressInterval = 10 * time.Millisecond
 
-var ErrScanRunning = errors.New("scan already running")
+var (
+	ErrScanRunning  = errors.New("scan already running")
+	ErrInvalidInput = errors.New("invalid input")
+)
 
 type scannerFactory func(root string, maxConcurrency int) scan.Engine
 
@@ -40,6 +43,14 @@ type Service struct {
 	progress      liveProgress
 }
 
+type NodeQueryOptions struct {
+	Limit   int
+	Query   string
+	Kind    string
+	MinSize int64
+	Sort    string
+}
+
 type ChildrenResponse struct {
 	ScanID     int64        `json:"scan_id"`
 	Path       string       `json:"path"`
@@ -51,6 +62,13 @@ type LargestResponse struct {
 	ScanID int64        `json:"scan_id"`
 	Path   string       `json:"path"`
 	Items  []store.Node `json:"items"`
+}
+
+type DiffResponse struct {
+	TargetScanID int64            `json:"target_scan_id"`
+	BaseScanID   int64            `json:"base_scan_id"`
+	Path         string           `json:"path"`
+	Items        []store.DiffItem `json:"items"`
 }
 
 func NewService(cfg config.Config, st *store.Store) *Service {
@@ -183,6 +201,12 @@ func (s *Service) runScan(scanID int64) {
 	}
 
 	s.clearRunning(scanID)
+	if deleted, err := s.store.PruneCompletedFailedScans(context.Background(), s.cfg.ScanHistoryMaxRuns); err != nil {
+		log.Printf("scan #%d prune warning: %v", scanID, err)
+	} else if len(deleted) > 0 {
+		log.Printf("scan #%d pruned %d old scan run(s)", scanID, len(deleted))
+	}
+
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 }
 
@@ -319,6 +343,49 @@ func (s *Service) GetLatestScanRun(ctx context.Context) (*store.ScanRun, error) 
 	return run, nil
 }
 
+func (s *Service) ListScans(ctx context.Context, limit int, status string) ([]store.ScanRun, error) {
+	if status != "" && !isValidScanStatus(status) {
+		return nil, fmt.Errorf("%w: unsupported scan status %q", ErrInvalidInput, status)
+	}
+
+	runs, err := s.store.ListScanRuns(ctx, limit, status)
+	if err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		if progress := s.snapshotProgress(runs[i].ID); progress != nil {
+			runs[i].Progress = progress
+		}
+	}
+	return runs, nil
+}
+
+func (s *Service) DeleteScan(ctx context.Context, scanID int64) error {
+	s.mu.Lock()
+	isRunning := s.running && s.runningScanID == scanID
+	s.mu.Unlock()
+	if isRunning {
+		return ErrScanRunning
+	}
+
+	run, err := s.store.GetScanRun(ctx, scanID)
+	if err != nil {
+		return err
+	}
+	if run.Status == "running" || run.Status == "queued" {
+		return ErrScanRunning
+	}
+
+	deleted, err := s.store.DeleteScanRun(ctx, scanID)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 func (s *Service) snapshotProgress(scanID int64) *store.ScanProgress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -338,13 +405,15 @@ func (s *Service) snapshotProgress(scanID int64) *store.ScanProgress {
 	}
 }
 
-func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath string, limit int) (ChildrenResponse, error) {
+func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath string, opts NodeQueryOptions) (ChildrenResponse, error) {
 	path, err := pathutil.NormalizeWithinRoot(s.cfg.AnalyzeRoot, requestedPath)
 	if err != nil {
 		return ChildrenResponse{}, err
 	}
-	if limit <= 0 || limit > s.cfg.MaxChildrenPerQuery {
-		limit = s.cfg.MaxChildrenPerQuery
+
+	normalized, err := normalizeNodeQueryOptions(opts, s.cfg.MaxChildrenPerQuery, "size_desc")
+	if err != nil {
+		return ChildrenResponse{}, err
 	}
 
 	node, err := s.store.GetNode(ctx, scanID, path)
@@ -352,7 +421,13 @@ func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath s
 		return ChildrenResponse{}, err
 	}
 
-	children, err := s.store.ListChildren(ctx, scanID, path, limit)
+	children, err := s.store.ListChildrenWithOptions(ctx, scanID, path, store.NodeQueryOptions{
+		Limit:   normalized.Limit,
+		Query:   normalized.Query,
+		Kind:    normalized.Kind,
+		MinSize: normalized.MinSize,
+		Sort:    normalized.Sort,
+	})
 	if err != nil {
 		return ChildrenResponse{}, err
 	}
@@ -365,19 +440,24 @@ func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath s
 	}, nil
 }
 
-func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath string, limit int) (LargestResponse, error) {
+func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath string, opts NodeQueryOptions) (LargestResponse, error) {
 	path, err := pathutil.NormalizeWithinRoot(s.cfg.AnalyzeRoot, requestedPath)
 	if err != nil {
 		return LargestResponse{}, err
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
+
+	normalized, err := normalizeNodeQueryOptions(opts, 1000, "size_desc")
+	if err != nil {
+		return LargestResponse{}, err
 	}
 
-	items, err := s.store.ListLargestInPath(ctx, scanID, path, limit)
+	items, err := s.store.ListLargestInPathWithOptions(ctx, scanID, path, store.NodeQueryOptions{
+		Limit:   normalized.Limit,
+		Query:   normalized.Query,
+		Kind:    normalized.Kind,
+		MinSize: normalized.MinSize,
+		Sort:    normalized.Sort,
+	})
 	if err != nil {
 		return LargestResponse{}, err
 	}
@@ -389,8 +469,85 @@ func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath st
 	}, nil
 }
 
+func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID int64, requestedPath string, limit int) (DiffResponse, error) {
+	path, err := pathutil.NormalizeWithinRoot(s.cfg.AnalyzeRoot, requestedPath)
+	if err != nil {
+		return DiffResponse{}, err
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	if _, err := s.store.GetScanRun(ctx, targetScanID); err != nil {
+		return DiffResponse{}, err
+	}
+	if _, err := s.store.GetScanRun(ctx, baseScanID); err != nil {
+		return DiffResponse{}, err
+	}
+
+	if _, err := s.store.GetNode(ctx, targetScanID, path); err != nil {
+		return DiffResponse{}, err
+	}
+	if _, err := s.store.GetNode(ctx, baseScanID, path); err != nil {
+		return DiffResponse{}, err
+	}
+
+	items, err := s.store.ListDirectoryDiff(ctx, targetScanID, baseScanID, path, limit)
+	if err != nil {
+		return DiffResponse{}, err
+	}
+
+	return DiffResponse{
+		TargetScanID: targetScanID,
+		BaseScanID:   baseScanID,
+		Path:         path,
+		Items:        items,
+	}, nil
+}
+
 func (s *Service) Config() config.Config {
 	return s.cfg
+}
+
+func normalizeNodeQueryOptions(opts NodeQueryOptions, maxLimit int, defaultSort string) (NodeQueryOptions, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = maxLimit
+	}
+	if opts.Limit > maxLimit {
+		opts.Limit = maxLimit
+	}
+
+	switch opts.Kind {
+	case "", "file", "dir":
+	default:
+		return NodeQueryOptions{}, fmt.Errorf("%w: unsupported type filter %q", ErrInvalidInput, opts.Kind)
+	}
+
+	switch opts.Sort {
+	case "", "size_desc", "size_asc", "name_asc", "name_desc":
+	default:
+		return NodeQueryOptions{}, fmt.Errorf("%w: unsupported sort %q", ErrInvalidInput, opts.Sort)
+	}
+
+	if opts.Sort == "" {
+		opts.Sort = defaultSort
+	}
+	if opts.MinSize < 0 {
+		return NodeQueryOptions{}, fmt.Errorf("%w: min_size must be >= 0", ErrInvalidInput)
+	}
+	return opts, nil
+}
+
+func isValidScanStatus(status string) bool {
+	switch status {
+	case "queued", "running", "completed", "failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func isUnreadableScanResult(result scan.Result) bool {
