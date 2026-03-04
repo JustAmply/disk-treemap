@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -80,6 +81,7 @@ func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem cha
 	info, err := os.Lstat(path)
 	if err != nil {
 		if isNonFatal(err) {
+			log.Printf("scan warning: lstat %q: %v", path, err)
 			return 0, 0, 1, nil
 		}
 		return 0, 0, 0, fmt.Errorf("lstat %q: %w", path, err)
@@ -108,6 +110,7 @@ func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem cha
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		if isNonFatal(err) {
+			log.Printf("scan warning: read dir %q: %v", path, err)
 			node.Kind = "dir"
 			node.SizeBytes = 0
 			if emitErr := emit(node); emitErr != nil {
