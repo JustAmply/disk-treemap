@@ -16,15 +16,15 @@ type Store struct {
 }
 
 type ScanRun struct {
-	ID           int64      `json:"id"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	Status       string     `json:"status"`
-	Error        string     `json:"error,omitempty"`
-	RootPath     string     `json:"root_path"`
-	TotalBytes   int64      `json:"total_bytes"`
-	TotalNodes   int64      `json:"total_nodes"`
-	WarningCount int64      `json:"warning_count"`
+	ID           int64         `json:"id"`
+	StartedAt    *time.Time    `json:"started_at,omitempty"`
+	FinishedAt   *time.Time    `json:"finished_at,omitempty"`
+	Status       string        `json:"status"`
+	Error        string        `json:"error,omitempty"`
+	RootPath     string        `json:"root_path"`
+	TotalBytes   int64         `json:"total_bytes"`
+	TotalNodes   int64         `json:"total_nodes"`
+	WarningCount int64         `json:"warning_count"`
 	Progress     *ScanProgress `json:"progress,omitempty"`
 }
 type ScanProgress struct {
@@ -57,8 +57,8 @@ func Open(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
