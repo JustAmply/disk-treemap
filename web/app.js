@@ -39,7 +39,13 @@
       } else {
         updateMeta(cfg.latest_scan);
         if (cfg.latest_scan.status === "completed") {
+          setScanState(`Completed (warnings: ${cfg.latest_scan.warning_count})`);
+          logScanWarnings(cfg.latest_scan);
           await loadPath(state.currentPath);
+        } else if (cfg.latest_scan.status === "failed") {
+          setScanState(`Failed: ${cfg.latest_scan.error || "unknown error"}`);
+        } else {
+          setScanState(`Scan ${cfg.latest_scan.status}`);
         }
       }
     }
@@ -74,6 +80,7 @@
 
         if (scan.status === "completed") {
           setScanState(`Completed (warnings: ${scan.warning_count})`);
+          logScanWarnings(scan);
           disableScanButton(false);
           state.pollingHandle = null;
           state.currentPath = state.config.analyze_root;
@@ -291,7 +298,7 @@
       return;
     }
 
-    els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | started: ${started} | finished: ${finished} | nodes: ${scan.total_nodes} | total: ${formatBytes(scan.total_bytes)}`;
+    els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | started: ${started} | finished: ${finished} | nodes: ${scan.total_nodes} | total: ${formatBytes(scan.total_bytes)} | warnings: ${scan.warning_count}`;
   }
 
   function showTooltip(x, y, html) {
@@ -328,6 +335,14 @@
       return path;
     }
     return `...${path.slice(-69)}`;
+  }
+
+  function logScanWarnings(scan) {
+    const warnings = Number(scan.warning_count || 0);
+    if (warnings <= 0) {
+      return;
+    }
+    console.warn(`Scan #${scan.id} completed with ${warnings} warning(s). Check server logs for permission/path details.`);
   }
 
   function formatBytes(bytes) {
@@ -372,3 +387,4 @@
     return body;
   }
 })();
+

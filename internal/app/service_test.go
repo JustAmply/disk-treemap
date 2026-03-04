@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,15 +81,23 @@ func (p *progressScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.
 	return scan.Result{TotalBytes: 42, TotalNodes: 2}, nil
 }
 
+type staticResultScanner struct {
+	result scan.Result
+}
+
+func (s *staticResultScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
+	return s.result, nil
+}
+
 func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
 	cfg := config.Config{
-		AnalyzeRoot:          root,
-		DataDir:              dataDir,
-		ScanMaxConcurrency:   2,
-		MaxChildrenPerQuery:  100,
+		AnalyzeRoot:         root,
+		DataDir:             dataDir,
+		ScanMaxConcurrency:  2,
+		MaxChildrenPerQuery: 100,
 	}
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
@@ -145,10 +154,10 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 	filePath := filepath.Join(root, "example.bin")
 
 	cfg := config.Config{
-		AnalyzeRoot:          root,
-		DataDir:              dataDir,
-		ScanMaxConcurrency:   2,
-		MaxChildrenPerQuery:  100,
+		AnalyzeRoot:         root,
+		DataDir:             dataDir,
+		ScanMaxConcurrency:  2,
+		MaxChildrenPerQuery: 100,
 	}
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
@@ -209,6 +218,57 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 		if getErr == nil && run.Status == "completed" {
 			if run.Progress != nil {
 				t.Fatalf("expected no live progress after completion")
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf("scan did not complete in time")
+}
+
+func TestServiceFailsUnreadableScanResult(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := config.Config{
+		AnalyzeRoot:         root,
+		DataDir:             dataDir,
+		ScanMaxConcurrency:  2,
+		MaxChildrenPerQuery: 100,
+	}
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(cfg, st)
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &staticResultScanner{result: scan.Result{TotalBytes: 0, TotalNodes: 4, WarningCount: 3}}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, getErr := st.GetScanRun(context.Background(), scanID)
+		if getErr == nil && (run.Status == "completed" || run.Status == "failed") {
+			if run.Status != "failed" {
+				t.Fatalf("expected failed, got %s", run.Status)
+			}
+			if run.WarningCount != 3 {
+				t.Fatalf("expected warning count 3, got %d", run.WarningCount)
+			}
+			if !strings.Contains(run.Error, "no readable files") {
+				t.Fatalf("expected unreadable scan error, got %q", run.Error)
 			}
 			return
 		}

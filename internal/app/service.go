@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -125,8 +126,12 @@ func (s *Service) runScan(scanID int64) {
 		s.recordProgress(scanID, node)
 		return nil
 	})
+	if scanErr == nil && isUnreadableScanResult(result) {
+		scanErr = fmt.Errorf("scan found no readable files under %q (warnings: %d); check mount and permissions", s.cfg.AnalyzeRoot, result.WarningCount)
+	}
 	if scanErr != nil {
 		_ = writer.Rollback()
+		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, scanErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
 		s.finishFailure(scanID, scanErr, 0, 0, result.WarningCount)
 		return
 	}
@@ -142,6 +147,7 @@ func (s *Service) runScan(scanID int64) {
 	}
 
 	s.clearRunning(scanID)
+	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 }
 
 func (s *Service) recordProgress(scanID int64, node scan.NodeRecord) {
@@ -275,4 +281,12 @@ func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath st
 
 func (s *Service) Config() config.Config {
 	return s.cfg
+}
+
+func isUnreadableScanResult(result scan.Result) bool {
+	if result.WarningCount == 0 || result.TotalBytes > 0 {
+		return false
+	}
+	// If every discovered non-root node is a warning-only node, the scan is effectively unreadable.
+	return result.TotalNodes <= result.WarningCount+1
 }
