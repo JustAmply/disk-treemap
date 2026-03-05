@@ -488,13 +488,6 @@ func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID
 		return DiffResponse{}, err
 	}
 
-	if _, err := s.store.GetNode(ctx, targetScanID, path); err != nil {
-		return DiffResponse{}, err
-	}
-	if _, err := s.store.GetNode(ctx, baseScanID, path); err != nil {
-		return DiffResponse{}, err
-	}
-
 	items, err := s.store.ListDirectoryDiff(ctx, targetScanID, baseScanID, path, limit)
 	if err != nil {
 		return DiffResponse{}, err

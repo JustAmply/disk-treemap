@@ -196,6 +196,51 @@ func TestDiffEndpointReturnsDirectoryDeltas(t *testing.T) {
 	}
 }
 
+func TestDiffEndpointAllowsPathMissingInBaseScan(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+
+	baseNodes := []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 200, MtimeUnix: 1},
+	}
+	targetPath := filepath.Join(root, "newdir")
+	targetNodes := []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 400, MtimeUnix: 1},
+		{Path: targetPath, ParentPath: root, Name: "newdir", Kind: "dir", SizeBytes: 300, MtimeUnix: 1},
+		{Path: filepath.Join(targetPath, "child"), ParentPath: targetPath, Name: "child", Kind: "dir", SizeBytes: 300, MtimeUnix: 1},
+	}
+
+	baseID := createCompletedScanWithNodes(t, st, root, baseNodes)
+	targetID := createCompletedScanWithNodes(t, st, root, targetNodes)
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?base_scan_id=" + strconv.FormatInt(baseID, 10) + "&path=" + url.QueryEscape(targetPath)
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload app.DiffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("expected 1 diff item, got %d", len(payload.Items))
+	}
+	if payload.Items[0].Name != "child" || payload.Items[0].ChangeClass != "new" {
+		t.Fatalf("unexpected diff item: %+v", payload.Items[0])
+	}
+}
 func testConfig(root, dataDir string) config.Config {
 	return config.Config{
 		AnalyzeRoot:          root,
