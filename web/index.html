@@ -9,46 +9,109 @@
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <h1>Disk Treemap</h1>
-      <p id="rootPath">Root: loading...</p>
-      <div id="scanLive" class="scan-live" hidden aria-live="polite">
-        <div id="scanLiveSummary" class="scan-live-summary"></div>
-        <div id="scanLiveDetails" class="scan-live-details"></div>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="app-heading">
+        <p class="eyebrow">Disk usage explorer</p>
+        <h1>Disk Treemap</h1>
+        <p id="rootPath" class="root-path">Loading root...</p>
       </div>
-    </div>
-    <div class="actions">
-      <button id="scanButton" type="button">Run Scan</button>
-      <span id="scanState" class="state">Idle</span>
-    </div>
-  </header>
 
-  <main class="layout">
-    <section class="panel chart-panel">
-      <div class="panel-head">
-        <h2>Treemap</h2>
-        <div id="breadcrumb" class="breadcrumb"></div>
+      <div class="header-actions">
+        <span id="scanState" class="status-chip" data-state="idle">Idle</span>
+        <button id="scanButton" class="scan-button" type="button">Run Scan</button>
       </div>
-      <div id="chart"></div>
-      <p id="chartHint" class="hint">Run a scan to view file sizes.</p>
+    </header>
+
+    <section id="scanBanner" class="scan-banner" hidden aria-live="polite">
+      <div id="scanBannerSummary" class="scan-banner-summary"></div>
+      <div id="scanBannerDetails" class="scan-banner-details"></div>
     </section>
 
-    <aside class="panel side-panel">
-      <h2>Largest Items</h2>
-      <p id="scanMeta" class="hint">No scan data yet.</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Size</th>
-          </tr>
-        </thead>
-        <tbody id="largestTable"></tbody>
-      </table>
-    </aside>
-  </main>
+    <section class="summary-strip" aria-label="Current view summary">
+      <div class="summary-card">
+        <span class="summary-label">Current folder</span>
+        <span id="summaryPath" class="summary-value summary-path">Not scanned yet</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">In view</span>
+        <span id="summarySize" class="summary-value">-</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Items</span>
+        <span id="summaryItems" class="summary-value">-</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Last scan</span>
+        <span id="summaryScan" class="summary-value">No scan yet</span>
+      </div>
+    </section>
+
+    <section id="appAlert" class="app-alert" hidden aria-live="polite">
+      <div id="appAlertText" class="app-alert-text"></div>
+      <button id="alertRetryButton" class="alert-button" type="button" hidden>Run Scan Again</button>
+    </section>
+
+    <main class="workspace">
+      <section class="surface main-panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Visualization</p>
+            <h2>Treemap</h2>
+          </div>
+
+          <div class="legend" aria-label="Legend">
+            <span class="legend-item">
+              <span class="legend-swatch legend-swatch-dir"></span>
+              Folders
+            </span>
+            <span class="legend-item">
+              <span class="legend-swatch legend-swatch-file"></span>
+              Files
+            </span>
+          </div>
+        </div>
+
+        <div id="chartFrame" class="chart-frame" data-view="empty">
+          <div id="chartEmpty" class="empty-state">
+            <p class="empty-eyebrow">Start here</p>
+            <h3 id="emptyStateTitle">Run a scan to map this folder</h3>
+            <p id="emptyStateBody" class="empty-body">
+              Scan the configured root path to build a treemap and ranked item list.
+            </p>
+            <button id="emptyScanButton" class="scan-button" type="button">Run Scan</button>
+          </div>
+
+          <div id="chartMessage" class="chart-message" hidden></div>
+          <div id="chart" class="chart-canvas" aria-label="Treemap chart"></div>
+        </div>
+      </section>
+
+      <aside class="surface inspector">
+        <div class="inspector-inner">
+          <div class="panel-header inspector-header">
+            <div>
+              <p class="panel-kicker">Explore</p>
+              <h2>Inspector</h2>
+            </div>
+            <p id="inspectorMeta" class="inspector-meta">Largest items in the current view.</p>
+          </div>
+
+          <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
+
+          <section class="inspector-section">
+            <div class="section-heading">
+              <h3>Largest items</h3>
+              <p id="largestSummary" class="section-note">No scan data yet.</p>
+            </div>
+
+            <div id="largestList" class="item-list" aria-live="polite"></div>
+            <p id="listEmpty" class="list-empty">Run a scan to inspect folders and files.</p>
+          </section>
+        </div>
+      </aside>
+    </main>
+  </div>
 
   <div id="tooltip" class="tooltip" hidden></div>
 </body>
