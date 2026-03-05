@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ type DiffResponse struct {
 	TargetScanID int64            `json:"target_scan_id"`
 	BaseScanID   int64            `json:"base_scan_id"`
 	Path         string           `json:"path"`
+	Summary      store.DiffItem   `json:"summary"`
 	Items        []store.DiffItem `json:"items"`
 }
 
@@ -469,16 +471,15 @@ func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath st
 	}, nil
 }
 
-func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID int64, requestedPath string, limit int) (DiffResponse, error) {
+func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID int64, requestedPath string, opts NodeQueryOptions) (DiffResponse, error) {
 	path, err := pathutil.NormalizeWithinRoot(s.cfg.AnalyzeRoot, requestedPath)
 	if err != nil {
 		return DiffResponse{}, err
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
+
+	normalized, err := normalizeDiffQueryOptions(opts, 1000, "delta_desc")
+	if err != nil {
+		return DiffResponse{}, err
 	}
 
 	if _, err := s.store.GetScanRun(ctx, targetScanID); err != nil {
@@ -488,7 +489,25 @@ func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID
 		return DiffResponse{}, err
 	}
 
-	items, err := s.store.ListDirectoryDiff(ctx, targetScanID, baseScanID, path, limit)
+	baseNode, err := s.lookupDiffDirectoryNode(ctx, baseScanID, path)
+	if err != nil {
+		return DiffResponse{}, err
+	}
+	targetNode, err := s.lookupDiffDirectoryNode(ctx, targetScanID, path)
+	if err != nil {
+		return DiffResponse{}, err
+	}
+	if baseNode == nil && targetNode == nil {
+		return DiffResponse{}, store.ErrNotFound
+	}
+
+	items, err := s.store.ListDiffChildren(ctx, targetScanID, baseScanID, path, store.DiffQueryOptions{
+		Limit:   normalized.Limit,
+		Query:   normalized.Query,
+		Kind:    normalized.Kind,
+		MinSize: normalized.MinSize,
+		Sort:    normalized.Sort,
+	})
 	if err != nil {
 		return DiffResponse{}, err
 	}
@@ -497,6 +516,7 @@ func (s *Service) GetDirectoryDiff(ctx context.Context, targetScanID, baseScanID
 		TargetScanID: targetScanID,
 		BaseScanID:   baseScanID,
 		Path:         path,
+		Summary:      summarizeDiffPath(path, baseNode, targetNode),
 		Items:        items,
 	}, nil
 }
@@ -532,6 +552,128 @@ func normalizeNodeQueryOptions(opts NodeQueryOptions, maxLimit int, defaultSort 
 		return NodeQueryOptions{}, fmt.Errorf("%w: min_size must be >= 0", ErrInvalidInput)
 	}
 	return opts, nil
+}
+
+func normalizeDiffQueryOptions(opts NodeQueryOptions, maxLimit int, defaultSort string) (NodeQueryOptions, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = maxLimit
+	}
+	if opts.Limit > maxLimit {
+		opts.Limit = maxLimit
+	}
+
+	switch opts.Kind {
+	case "", "file", "dir":
+	default:
+		return NodeQueryOptions{}, fmt.Errorf("%w: unsupported type filter %q", ErrInvalidInput, opts.Kind)
+	}
+
+	switch opts.Sort {
+	case "", "delta_desc", "delta_asc", "size_desc", "size_asc", "name_asc", "name_desc":
+	default:
+		return NodeQueryOptions{}, fmt.Errorf("%w: unsupported compare sort %q", ErrInvalidInput, opts.Sort)
+	}
+
+	if opts.Sort == "" {
+		opts.Sort = defaultSort
+	}
+	if opts.MinSize < 0 {
+		return NodeQueryOptions{}, fmt.Errorf("%w: min_size must be >= 0", ErrInvalidInput)
+	}
+	return opts, nil
+}
+
+func (s *Service) lookupDiffDirectoryNode(ctx context.Context, scanID int64, path string) (*store.Node, error) {
+	node, err := s.store.GetNode(ctx, scanID, path)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if node.Kind != "dir" {
+		return nil, nil
+	}
+	return &node, nil
+}
+
+func summarizeDiffPath(path string, baseNode, targetNode *store.Node) store.DiffItem {
+	name := lastPathComponent(path)
+	if targetNode != nil && targetNode.Name != "" {
+		name = targetNode.Name
+	} else if baseNode != nil && baseNode.Name != "" {
+		name = baseNode.Name
+	}
+
+	beforeBytes := int64(0)
+	afterBytes := int64(0)
+	if baseNode != nil {
+		beforeBytes = baseNode.SizeBytes
+	}
+	if targetNode != nil {
+		afterBytes = targetNode.SizeBytes
+	}
+
+	item := store.DiffItem{
+		Path:            path,
+		Name:            name,
+		Kind:            "dir",
+		BeforeExists:    baseNode != nil,
+		AfterExists:     targetNode != nil,
+		BeforeBytes:     beforeBytes,
+		AfterBytes:      afterBytes,
+		DeltaBytes:      afterBytes - beforeBytes,
+		VisualSizeBytes: maxDiffBytes(beforeBytes, afterBytes),
+	}
+
+	switch {
+	case !item.BeforeExists && item.AfterExists:
+		item.ChangeClass = "new"
+		item.DeltaPercent = 100
+	case item.BeforeExists && !item.AfterExists:
+		item.ChangeClass = "removed"
+		if beforeBytes == 0 {
+			item.DeltaPercent = 0
+		} else {
+			item.DeltaPercent = -100
+		}
+	case item.DeltaBytes > 0:
+		item.ChangeClass = "grew"
+		if beforeBytes == 0 {
+			item.DeltaPercent = 100
+		} else {
+			item.DeltaPercent = (float64(item.DeltaBytes) * 100.0) / float64(beforeBytes)
+		}
+	case item.DeltaBytes < 0:
+		item.ChangeClass = "shrunk"
+		if beforeBytes == 0 {
+			item.DeltaPercent = 0
+		} else {
+			item.DeltaPercent = (float64(item.DeltaBytes) * 100.0) / float64(beforeBytes)
+		}
+	default:
+		item.ChangeClass = "unchanged"
+		item.DeltaPercent = 0
+	}
+
+	return item
+}
+
+func lastPathComponent(path string) string {
+	parts := strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) == 0 {
+		return path
+	}
+	return parts[len(parts)-1]
+}
+
+func maxDiffBytes(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func isValidScanStatus(status string) bool {

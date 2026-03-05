@@ -62,14 +62,26 @@ type NodeQueryOptions struct {
 	Sort    string
 }
 
+type DiffQueryOptions struct {
+	Limit   int
+	Query   string
+	Kind    string
+	MinSize int64
+	Sort    string
+}
+
 type DiffItem struct {
-	Path         string  `json:"path"`
-	Name         string  `json:"name"`
-	BeforeBytes  int64   `json:"before_bytes"`
-	AfterBytes   int64   `json:"after_bytes"`
-	DeltaBytes   int64   `json:"delta_bytes"`
-	DeltaPercent float64 `json:"delta_percent"`
-	ChangeClass  string  `json:"change_class"`
+	Path            string  `json:"path"`
+	Name            string  `json:"name"`
+	Kind            string  `json:"type"`
+	BeforeExists    bool    `json:"before_exists"`
+	AfterExists     bool    `json:"after_exists"`
+	BeforeBytes     int64   `json:"before_bytes"`
+	AfterBytes      int64   `json:"after_bytes"`
+	DeltaBytes      int64   `json:"delta_bytes"`
+	DeltaPercent    float64 `json:"delta_percent"`
+	VisualSizeBytes int64   `json:"visual_size_bytes"`
+	ChangeClass     string  `json:"change_class"`
 }
 
 type NodeWriter struct {
@@ -507,75 +519,97 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 }
 
 func (s *Store) ListDirectoryDiff(ctx context.Context, targetScanID, baseScanID int64, parentPath string, limit int) ([]DiffItem, error) {
-	if limit <= 0 {
-		limit = 100
+	return s.ListDiffChildren(ctx, targetScanID, baseScanID, parentPath, DiffQueryOptions{Limit: limit, Sort: "delta_desc"})
+}
+
+func (s *Store) ListDiffChildren(ctx context.Context, targetScanID, baseScanID int64, parentPath string, opts DiffQueryOptions) ([]DiffItem, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 100
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		WITH base_dirs AS (
-			SELECT path, name, size_bytes
+	query := strings.Builder{}
+	query.WriteString(`
+		WITH base_items AS (
+			SELECT path, name, kind, size_bytes
 			FROM nodes
-			WHERE scan_id=? AND parent_path=? AND kind='dir'
-		), target_dirs AS (
-			SELECT path, name, size_bytes
+			WHERE scan_id=? AND parent_path=?
+		), target_items AS (
+			SELECT path, name, kind, size_bytes
 			FROM nodes
-			WHERE scan_id=? AND parent_path=? AND kind='dir'
+			WHERE scan_id=? AND parent_path=?
 		), joined AS (
 			SELECT
 				COALESCE(t.path, b.path) AS path,
 				COALESCE(t.name, b.name) AS name,
+				COALESCE(t.kind, b.kind) AS kind,
+				b.path AS before_path,
+				t.path AS after_path,
 				b.size_bytes AS before_bytes,
 				t.size_bytes AS after_bytes
-			FROM base_dirs b
-			LEFT JOIN target_dirs t ON t.name = b.name
+			FROM base_items b
+			LEFT JOIN target_items t
+				ON t.name = b.name
+				AND t.kind = b.kind
 			UNION ALL
 			SELECT
 				t.path AS path,
 				t.name AS name,
+				t.kind AS kind,
+				NULL AS before_path,
+				t.path AS after_path,
 				NULL AS before_bytes,
 				t.size_bytes AS after_bytes
-			FROM target_dirs t
-			LEFT JOIN base_dirs b ON b.name = t.name
-			WHERE b.name IS NULL
+			FROM target_items t
+			LEFT JOIN base_items b
+				ON b.name = t.name
+				AND b.kind = t.kind
+			WHERE b.path IS NULL
 		)
 		SELECT
 			path,
 			name,
-			COALESCE(before_bytes, 0) AS before_bytes,
-			COALESCE(after_bytes, 0) AS after_bytes,
-			COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0) AS delta_bytes,
-			CASE
-				WHEN before_bytes IS NULL AND COALESCE(after_bytes, 0) > 0 THEN 100.0
-				WHEN COALESCE(before_bytes, 0) = 0 AND COALESCE(after_bytes, 0) = 0 THEN 0.0
-				WHEN COALESCE(before_bytes, 0) = 0 THEN 100.0
-				ELSE ((COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) * 100.0) / COALESCE(before_bytes, 1)
-			END AS delta_percent,
-			CASE
-				WHEN before_bytes IS NULL THEN 'new'
-				WHEN after_bytes IS NULL THEN 'removed'
-				WHEN after_bytes > before_bytes THEN 'grew'
-				WHEN after_bytes < before_bytes THEN 'shrunk'
-				ELSE 'unchanged'
-			END AS change_class
+			kind,
+			before_path,
+			after_path,
+			before_bytes,
+			after_bytes
 		FROM joined
-		ORDER BY ABS(delta_bytes) DESC, name ASC
-		LIMIT ?
-	`, baseScanID, parentPath, targetScanID, parentPath, limit)
+		WHERE (
+			before_path IS NULL
+			OR after_path IS NULL
+			OR COALESCE(before_bytes, 0) <> COALESCE(after_bytes, 0)
+		)
+	`)
+
+	args := []any{baseScanID, parentPath, targetScanID, parentPath}
+	appendDiffFilters(&query, &args, opts)
+
+	query.WriteString(" ORDER BY ")
+	query.WriteString(normalizeDiffSort(opts.Sort))
+	query.WriteString(" LIMIT ?")
+	args = append(args, opts.Limit)
+
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
-		return nil, fmt.Errorf("list directory diff: %w", err)
+		return nil, fmt.Errorf("list diff children: %w", err)
 	}
 	defer rows.Close()
 
 	items := make([]DiffItem, 0)
 	for rows.Next() {
-		var item DiffItem
-		if err := rows.Scan(&item.Path, &item.Name, &item.BeforeBytes, &item.AfterBytes, &item.DeltaBytes, &item.DeltaPercent, &item.ChangeClass); err != nil {
+		var (
+			path        string
+			name        string
+			kind        string
+			beforePath  sql.NullString
+			afterPath   sql.NullString
+			beforeBytes sql.NullInt64
+			afterBytes  sql.NullInt64
+		)
+		if err := rows.Scan(&path, &name, &kind, &beforePath, &afterPath, &beforeBytes, &afterBytes); err != nil {
 			return nil, fmt.Errorf("scan diff row: %w", err)
 		}
-		if math.IsNaN(item.DeltaPercent) || math.IsInf(item.DeltaPercent, 0) {
-			item.DeltaPercent = 0
-		}
-		items = append(items, item)
+		items = append(items, buildDiffItem(path, name, kind, beforePath.Valid, afterPath.Valid, beforeBytes.Int64, afterBytes.Int64))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate diff rows: %w", err)
@@ -625,6 +659,21 @@ func appendNodeFilters(query *strings.Builder, args *[]any, opts NodeQueryOption
 	}
 }
 
+func appendDiffFilters(query *strings.Builder, args *[]any, opts DiffQueryOptions) {
+	if opts.Kind == "file" || opts.Kind == "dir" {
+		query.WriteString(" AND kind=?")
+		*args = append(*args, opts.Kind)
+	}
+	if opts.Query != "" {
+		query.WriteString(" AND lower(name) LIKE ?")
+		*args = append(*args, "%"+strings.ToLower(opts.Query)+"%")
+	}
+	if opts.MinSize > 0 {
+		query.WriteString(" AND MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0))>=?")
+		*args = append(*args, opts.MinSize)
+	}
+}
+
 func normalizeSort(sort string) string {
 	switch sort {
 	case "size_asc":
@@ -638,6 +687,76 @@ func normalizeSort(sort string) string {
 	default:
 		return "size_bytes DESC, name ASC"
 	}
+}
+
+func normalizeDiffSort(sort string) string {
+	switch sort {
+	case "delta_asc":
+		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) ASC, name ASC"
+	case "size_desc":
+		return "MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0)) DESC, name ASC"
+	case "size_asc":
+		return "MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0)) ASC, name ASC"
+	case "name_asc":
+		return "name ASC, kind ASC"
+	case "name_desc":
+		return "name DESC, kind DESC"
+	case "delta_desc", "":
+		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) DESC, name ASC"
+	default:
+		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) DESC, name ASC"
+	}
+}
+
+func buildDiffItem(path, name, kind string, beforeExists, afterExists bool, beforeBytes, afterBytes int64) DiffItem {
+	item := DiffItem{
+		Path:            path,
+		Name:            name,
+		Kind:            kind,
+		BeforeExists:    beforeExists,
+		AfterExists:     afterExists,
+		BeforeBytes:     beforeBytes,
+		AfterBytes:      afterBytes,
+		DeltaBytes:      afterBytes - beforeBytes,
+		VisualSizeBytes: maxInt64(beforeBytes, afterBytes),
+	}
+
+	switch {
+	case !beforeExists && afterExists:
+		item.ChangeClass = "new"
+	case beforeExists && !afterExists:
+		item.ChangeClass = "removed"
+	case item.DeltaBytes > 0:
+		item.ChangeClass = "grew"
+	case item.DeltaBytes < 0:
+		item.ChangeClass = "shrunk"
+	default:
+		item.ChangeClass = "unchanged"
+	}
+
+	switch {
+	case !beforeExists && afterExists:
+		item.DeltaPercent = 100
+	case beforeBytes == 0 && afterBytes == 0:
+		item.DeltaPercent = 0
+	case beforeBytes == 0:
+		item.DeltaPercent = 100
+	default:
+		item.DeltaPercent = (float64(item.DeltaBytes) * 100.0) / float64(beforeBytes)
+	}
+
+	if math.IsNaN(item.DeltaPercent) || math.IsInf(item.DeltaPercent, 0) {
+		item.DeltaPercent = 0
+	}
+
+	return item
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func attachScanTimestamps(run *ScanRun, startedAt, finishedAt sql.NullString) {

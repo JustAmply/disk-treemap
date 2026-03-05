@@ -275,8 +275,19 @@ func (h *Handler) handleGetDiff(w http.ResponseWriter, r *http.Request, targetSc
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	minSize, err := parseInt64Query(r, "min_size", 0)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
-	resp, err := h.svc.GetDirectoryDiff(r.Context(), targetScanID, baseScanID, r.URL.Query().Get("path"), limit)
+	resp, err := h.svc.GetDirectoryDiff(r.Context(), targetScanID, baseScanID, r.URL.Query().Get("path"), app.NodeQueryOptions{
+		Limit:   limit,
+		Query:   strings.TrimSpace(r.URL.Query().Get("q")),
+		Kind:    strings.TrimSpace(r.URL.Query().Get("type")),
+		MinSize: minSize,
+		Sort:    strings.TrimSpace(r.URL.Query().Get("sort")),
+	})
 	if err != nil {
 		h.handleDomainError(w, err)
 		return

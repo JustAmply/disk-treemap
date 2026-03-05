@@ -325,3 +325,144 @@ func TestDiffEndpointValidatesBaseScanIDFormat(t *testing.T) {
 		t.Fatalf("expected invalid base_scan_id error, got %q", payload["error"])
 	}
 }
+
+func TestDiffEndpointAllowsPathMissingInTargetScan(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+
+	removedPath := filepath.Join(root, "removed")
+	baseID := createCompletedScanWithNodes(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 200, MtimeUnix: 1},
+		{Path: removedPath, ParentPath: root, Name: "removed", Kind: "dir", SizeBytes: 100, MtimeUnix: 1},
+		{Path: filepath.Join(removedPath, "child.txt"), ParentPath: removedPath, Name: "child.txt", Kind: "file", SizeBytes: 100, MtimeUnix: 1},
+	})
+	targetID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 80, MtimeUnix: 1}})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?base_scan_id=" + strconv.FormatInt(baseID, 10) + "&path=" + url.QueryEscape(removedPath)
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload app.DiffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Summary.ChangeClass != "removed" {
+		t.Fatalf("expected removed summary, got %+v", payload.Summary)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Name != "child.txt" || payload.Items[0].ChangeClass != "removed" {
+		t.Fatalf("unexpected payload items: %+v", payload.Items)
+	}
+}
+
+func TestDiffEndpointSupportsCompareFiltersAndSummary(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+
+	baseID := createCompletedScanWithNodes(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 120, MtimeUnix: 1},
+		{Path: filepath.Join(root, "docs"), ParentPath: root, Name: "docs", Kind: "dir", SizeBytes: 30, MtimeUnix: 1},
+		{Path: filepath.Join(root, "report.txt"), ParentPath: root, Name: "report.txt", Kind: "file", SizeBytes: 15, MtimeUnix: 1},
+	})
+	targetID := createCompletedScanWithNodes(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 260, MtimeUnix: 1},
+		{Path: filepath.Join(root, "docs"), ParentPath: root, Name: "docs", Kind: "dir", SizeBytes: 130, MtimeUnix: 1},
+		{Path: filepath.Join(root, "report.txt"), ParentPath: root, Name: "report.txt", Kind: "file", SizeBytes: 90, MtimeUnix: 1},
+	})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	params := url.Values{}
+	params.Set("base_scan_id", strconv.FormatInt(baseID, 10))
+	params.Set("path", root)
+	params.Set("type", "file")
+	params.Set("q", ".txt")
+	params.Set("min_size", "50")
+	params.Set("sort", "size_desc")
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?" + params.Encode()
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload app.DiffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.Summary.ChangeClass != "grew" {
+		t.Fatalf("expected grew summary, got %+v", payload.Summary)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Name != "report.txt" || payload.Items[0].Kind != "file" {
+		t.Fatalf("unexpected filtered payload: %+v", payload.Items)
+	}
+}
+
+func TestDiffEndpointReturnsNotFoundWhenPathMissingInBothScans(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	baseID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 1, MtimeUnix: 1}})
+	targetID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 2, MtimeUnix: 1}})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	missingPath := filepath.Join(root, "missing")
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?base_scan_id=" + strconv.FormatInt(baseID, 10) + "&path=" + url.QueryEscape(missingPath)
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDiffEndpointRejectsUnsupportedCompareSort(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	targetID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 1, MtimeUnix: 1}})
+	baseID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 1, MtimeUnix: 1}})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?base_scan_id=" + strconv.FormatInt(baseID, 10) + "&path=" + url.QueryEscape(root) + "&sort=bogus"
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

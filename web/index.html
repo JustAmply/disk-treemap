@@ -54,12 +54,7 @@
         </label>
         <label>
           Sort
-          <select id="sortSelect">
-            <option value="size_desc">Size desc</option>
-            <option value="size_asc">Size asc</option>
-            <option value="name_asc">Name asc</option>
-            <option value="name_desc">Name desc</option>
-          </select>
+          <select id="sortSelect"></select>
         </label>
         <button id="applyFiltersButton" type="button">Apply</button>
         <button id="resetFiltersButton" type="button" class="secondary">Reset</button>
@@ -68,47 +63,17 @@
 
     <section class="panel chart-panel">
       <div class="panel-head">
-        <h2>Treemap</h2>
+        <div>
+          <h2>Treemap</h2>
+          <p id="compareMeta" class="hint" hidden></p>
+        </div>
         <div id="breadcrumb" class="breadcrumb"></div>
+      </div>
+      <div id="compareSummary" class="compare-summary" hidden>
+        <div id="comparePathState" class="compare-path-state"></div>
       </div>
       <div id="chart"></div>
       <p id="chartHint" class="hint">Run a scan to view file sizes.</p>
-    </section>
-
-    <section class="panel diff-panel" id="diffPanel" hidden>
-      <div class="panel-head">
-        <h2>Directory Diff</h2>
-        <p id="diffMeta" class="hint"></p>
-      </div>
-      <div class="diff-grid">
-        <div>
-          <h3>Top Growth</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Delta</th>
-                <th>%</th>
-              </tr>
-            </thead>
-            <tbody id="growthTable"></tbody>
-          </table>
-        </div>
-        <div>
-          <h3>Top Shrink</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Delta</th>
-                <th>%</th>
-              </tr>
-            </thead>
-            <tbody id="shrinkTable"></tbody>
-          </table>
-        </div>
-      </div>
-      <p id="diffEmpty" class="hint" hidden>No directory deltas for this path.</p>
     </section>
 
     <aside class="panel side-panel">
@@ -131,18 +96,15 @@
       </section>
 
       <section>
-        <h2>Largest Items</h2>
+        <h2 id="detailTitle">Largest Items</h2>
         <p id="scanMeta" class="hint">No scan data yet.</p>
         <table>
           <thead>
-            <tr>
-              <th>Name</th>
-              <th>Type</th>
-              <th>Size</th>
-            </tr>
+            <tr id="detailHead"></tr>
           </thead>
-          <tbody id="largestTable"></tbody>
+          <tbody id="detailBody"></tbody>
         </table>
+        <p id="detailEmpty" class="hint" hidden></p>
       </section>
     </aside>
   </main>

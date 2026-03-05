@@ -8,7 +8,6 @@
     scanLiveDetails: document.getElementById("scanLiveDetails"),
     chart: document.getElementById("chart"),
     chartHint: document.getElementById("chartHint"),
-    largestTable: document.getElementById("largestTable"),
     breadcrumb: document.getElementById("breadcrumb"),
     scanMeta: document.getElementById("scanMeta"),
     tooltip: document.getElementById("tooltip"),
@@ -22,18 +21,37 @@
     sortSelect: document.getElementById("sortSelect"),
     applyFiltersButton: document.getElementById("applyFiltersButton"),
     resetFiltersButton: document.getElementById("resetFiltersButton"),
-    diffPanel: document.getElementById("diffPanel"),
-    diffMeta: document.getElementById("diffMeta"),
-    diffEmpty: document.getElementById("diffEmpty"),
-    growthTable: document.getElementById("growthTable"),
-    shrinkTable: document.getElementById("shrinkTable"),
+    compareMeta: document.getElementById("compareMeta"),
+    compareSummary: document.getElementById("compareSummary"),
+    comparePathState: document.getElementById("comparePathState"),
+    detailTitle: document.getElementById("detailTitle"),
+    detailHead: document.getElementById("detailHead"),
+    detailBody: document.getElementById("detailBody"),
+    detailEmpty: document.getElementById("detailEmpty"),
+  };
+
+  const sortOptions = {
+    normal: [
+      { value: "size_desc", label: "Size desc" },
+      { value: "size_asc", label: "Size asc" },
+      { value: "name_asc", label: "Name asc" },
+      { value: "name_desc", label: "Name desc" },
+    ],
+    compare: [
+      { value: "delta_desc", label: "Delta desc" },
+      { value: "delta_asc", label: "Delta asc" },
+      { value: "size_desc", label: "Size desc" },
+      { value: "size_asc", label: "Size asc" },
+      { value: "name_asc", label: "Name asc" },
+      { value: "name_desc", label: "Name desc" },
+    ],
   };
 
   const defaultFilters = {
     q: "",
     type: "",
     minSize: 0,
-    sort: "size_desc",
+    sort: "",
   };
 
   const state = {
@@ -57,28 +75,29 @@
     const cfg = await apiGet("/api/v1/config");
     state.config = cfg;
     state.currentPath = state.urlState.path || cfg.analyze_root;
-
+    state.baseScanId = state.urlState.baseScanId;
     state.filters = {
       q: state.urlState.q || "",
       type: state.urlState.type || "",
       minSize: state.urlState.minSize || 0,
-      sort: state.urlState.sort || "size_desc",
+      sort: state.urlState.sort || "",
     };
-    syncFilterInputs();
 
     els.rootPath.textContent = `Root: ${cfg.analyze_root}`;
 
     await loadHistory();
+    ensureValidSortForMode();
+    syncSortOptions();
+    syncFilterInputs();
 
     const desiredScanId = state.urlState.scanId || cfg.latest_scan?.id || state.historyItems[0]?.id || null;
     if (!desiredScanId) {
       setScanState("No scans yet");
       clearLiveStatus();
-      renderDiff(null);
+      clearRenderedResults("No scan data available.");
       return;
     }
 
-    state.baseScanId = state.urlState.baseScanId;
     await openScan(desiredScanId, { preservePath: true });
   }
 
@@ -90,28 +109,25 @@
     els.compareBaseSelect.addEventListener("change", () => {
       const value = Number(els.compareBaseSelect.value || 0);
       state.baseScanId = value > 0 ? value : null;
-      if (!state.activeScanId || !state.currentPath) {
-        syncUrlState();
-        renderDiff(null);
-        return;
-      }
-      loadPath(state.currentPath).catch((err) => setScanState(`Diff error: ${err.message}`));
+      ensureValidSortForMode();
+      syncSortOptions();
+      syncFilterInputs();
+      reloadCurrentPath().catch((err) => setScanState(`Diff error: ${err.message}`));
     });
     els.clearCompareButton.addEventListener("click", () => {
       state.baseScanId = null;
-      els.compareBaseSelect.value = "";
-      syncUrlState();
-      renderDiff(null);
+      ensureValidSortForMode();
+      syncSortOptions();
+      syncFilterInputs();
+      reloadCurrentPath().catch((err) => setScanState(`Load error: ${err.message}`));
     });
-
     els.applyFiltersButton.addEventListener("click", applyFilters);
     els.resetFiltersButton.addEventListener("click", () => {
       state.filters = { ...defaultFilters };
+      ensureValidSortForMode();
+      syncSortOptions();
       syncFilterInputs();
-      if (state.activeScanId && state.currentPath) {
-        loadPath(state.currentPath).catch((err) => setScanState(`Load error: ${err.message}`));
-      }
-      syncUrlState();
+      reloadCurrentPath().catch((err) => setScanState(`Load error: ${err.message}`));
     });
     els.searchInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -121,18 +137,71 @@
     });
   }
 
+  function isCompareMode() {
+    return Boolean(state.baseScanId && state.activeScanId && state.baseScanId !== state.activeScanId);
+  }
+
+  function defaultSortForMode() {
+    return isCompareMode() ? "delta_desc" : "size_desc";
+  }
+
+  function allowedSortsForMode() {
+    return (isCompareMode() ? sortOptions.compare : sortOptions.normal).map((item) => item.value);
+  }
+
+  function ensureValidSortForMode() {
+    const allowed = allowedSortsForMode();
+    if (!allowed.includes(state.filters.sort)) {
+      state.filters.sort = defaultSortForMode();
+    }
+  }
+
+  function syncSortOptions() {
+    const options = isCompareMode() ? sortOptions.compare : sortOptions.normal;
+    els.sortSelect.innerHTML = "";
+    for (const optionDef of options) {
+      const option = document.createElement("option");
+      option.value = optionDef.value;
+      option.textContent = optionDef.label;
+      els.sortSelect.appendChild(option);
+    }
+  }
+
+  function syncFilterInputs() {
+    els.searchInput.value = state.filters.q;
+    els.typeFilter.value = state.filters.type;
+    els.minSizeInput.value = String(state.filters.minSize || 0);
+    els.sortSelect.value = state.filters.sort || defaultSortForMode();
+  }
+
   function applyFilters() {
     state.filters = {
       q: (els.searchInput.value || "").trim(),
       type: (els.typeFilter.value || "").trim(),
       minSize: Math.max(0, Number.parseInt(els.minSizeInput.value || "0", 10) || 0),
-      sort: (els.sortSelect.value || "size_desc").trim(),
+      sort: (els.sortSelect.value || "").trim(),
     };
+    ensureValidSortForMode();
+    syncSortOptions();
+    syncFilterInputs();
+    reloadCurrentPath().catch((err) => setScanState(`Load error: ${err.message}`));
+  }
 
-    if (state.activeScanId && state.currentPath) {
-      loadPath(state.currentPath).catch((err) => setScanState(`Load error: ${err.message}`));
+  async function reloadCurrentPath() {
+    if (!state.activeScanId || !state.currentPath) {
+      syncUrlState();
+      return;
     }
-    syncUrlState();
+
+    try {
+      await loadPath(state.currentPath);
+    } catch (err) {
+      if (!isCompareMode()) {
+        throw err;
+      }
+      state.currentPath = state.config.analyze_root;
+      await loadPath(state.currentPath);
+    }
   }
 
   async function loadHistory() {
@@ -149,7 +218,7 @@
         selected = await apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
         upsertHistoryScan(selected);
       } catch {
-        if (!state.historyItems || state.historyItems.length === 0) {
+        if (!state.historyItems.length) {
           throw new Error(`scan #${scanId} not found`);
         }
         selected = state.historyItems[0];
@@ -161,7 +230,6 @@
     renderHistory();
     renderCompareOptions();
     syncUrlState();
-
     updateMeta(selected);
 
     if (selected.status === "running" || selected.status === "queued") {
@@ -219,7 +287,6 @@
     disableScanButton(true);
     if (state.pollingHandle) {
       clearTimeout(state.pollingHandle);
-      state.pollingHandle = null;
     }
 
     const poll = async () => {
@@ -231,7 +298,7 @@
 
         if (scan.status === "completed") {
           clearLiveStatus();
-          setScanState(`Completed (warnings: ${scan.warning_count})`);
+          setScanState(`Completed (warnings: ${scan.warning_count || 0})`);
           disableScanButton(false);
           state.pollingHandle = null;
           await loadHistory();
@@ -243,22 +310,17 @@
         if (scan.status === "failed") {
           clearLiveStatus();
           setScanState(`Failed: ${scan.error || "unknown error"}`);
-          clearRenderedResults(`Scan #${scan.id} failed. No data to display.`);
           disableScanButton(false);
           state.pollingHandle = null;
           await loadHistory();
+          clearRenderedResults(`Scan #${scan.id} failed. No data to display.`);
           return;
         }
 
-        if (scan.progress) {
-          setScanState(`Scanning ${scan.progress.scanned_nodes} items (${formatBytes(scan.progress.scanned_bytes)})`, true);
-        } else {
-          setScanState(`Scan ${scan.status}`, true);
-        }
-        state.pollingHandle = setTimeout(poll, 900);
+        setScanState(`Scan ${scan.status}`, true);
+        state.pollingHandle = setTimeout(poll, 250);
       } catch (err) {
-        clearLiveStatus();
-        setScanState(`Status error: ${err.message}`);
+        setScanState(`Polling error: ${err.message}`);
         disableScanButton(false);
         state.pollingHandle = null;
       }
@@ -288,6 +350,30 @@
       return;
     }
 
+    ensureValidSortForMode();
+    syncSortOptions();
+    syncFilterInputs();
+
+    if (isCompareMode()) {
+      const diffQuery = new URLSearchParams({
+        base_scan_id: String(state.baseScanId),
+        path,
+        limit: "150",
+        q: state.filters.q,
+        type: state.filters.type,
+        min_size: String(state.filters.minSize),
+        sort: state.filters.sort,
+      });
+      const diff = await apiGet(`/api/v1/scans/${state.activeScanId}/diff?${diffQuery.toString()}`);
+      state.currentPath = diff.path;
+      renderBreadcrumb(diff.path);
+      renderCompareSummary(diff);
+      renderCompareTreemap(diff);
+      renderCompareItems(diff.items || []);
+      syncUrlState();
+      return;
+    }
+
     const query = new URLSearchParams({
       path,
       limit: "150",
@@ -297,26 +383,34 @@
       sort: state.filters.sort,
     });
 
-    const childrenPromise = apiGet(`/api/v1/scans/${state.activeScanId}/children?${query.toString()}`);
-    const largestPromise = apiGet(`/api/v1/scans/${state.activeScanId}/largest?${query.toString()}`);
-
-    let diffPromise = Promise.resolve(null);
-    if (state.baseScanId && state.baseScanId !== state.activeScanId) {
-      const diffQuery = new URLSearchParams({
-        base_scan_id: String(state.baseScanId),
-        path,
-        limit: "100",
-      });
-      diffPromise = apiGet(`/api/v1/scans/${state.activeScanId}/diff?${diffQuery.toString()}`);
-    }
-
-    const [children, largest, diff] = await Promise.all([childrenPromise, largestPromise, diffPromise]);
+    const [children, largest] = await Promise.all([
+      apiGet(`/api/v1/scans/${state.activeScanId}/children?${query.toString()}`),
+      apiGet(`/api/v1/scans/${state.activeScanId}/largest?${query.toString()}`),
+    ]);
 
     state.currentPath = children.path;
     renderBreadcrumb(children.path);
-    renderTreemap(children);
-    renderLargest(largest.items);
-    renderDiff(diff);
+    hideCompareSummary();
+    renderTreemapNodes(
+      children.path,
+      children.total_bytes || 0,
+      (children.children || []).map((item) => ({
+        name: item.name,
+        path: item.path,
+        kind: item.type,
+        value: Math.max(item.size_bytes || 0, 0),
+        color: item.type === "dir" ? "#8ecae6" : "#ffb703",
+        clickable: item.type === "dir",
+        tooltip: [
+          `<strong>${escapeHtml(item.name)}</strong>`,
+          escapeHtml(item.path),
+          `${formatBytes(item.size_bytes || 0)} (${formatPercent(item.size_bytes || 0, children.total_bytes || 0)})`,
+          escapeHtml(item.type),
+        ].join("<br>"),
+      })),
+      "No child items at this path for current filters."
+    );
+    renderLargest(largest.items || []);
     syncUrlState();
   }
 
@@ -326,40 +420,37 @@
     els.chartHint.hidden = false;
     els.chartHint.textContent = message;
     els.breadcrumb.innerHTML = "";
-    els.largestTable.innerHTML = "";
-    els.scanMeta.textContent = message;
-    renderDiff(null);
+    els.detailBody.innerHTML = "";
+    els.detailHead.innerHTML = "";
+    els.detailEmpty.hidden = true;
+    hideCompareSummary();
     syncUrlState();
   }
-  function renderTreemap(childrenResponse) {
+
+  function renderTreemapNodes(path, totalBytes, items, emptyMessage) {
     els.chart.innerHTML = "";
 
-    const items = childrenResponse.children || [];
-    if (items.length === 0) {
+    if (!items.length) {
       els.chartHint.hidden = false;
-      els.chartHint.textContent = "No child items at this path for current filters.";
+      els.chartHint.textContent = emptyMessage;
       return;
     }
 
     els.chartHint.hidden = true;
-
     const width = Math.max(els.chart.clientWidth, 300);
     const height = Math.max(els.chart.clientHeight, 320);
-
     const data = {
-      name: basename(childrenResponse.path),
-      path: childrenResponse.path,
+      name: basename(path),
+      path,
       children: items.map((item) => ({
-        name: item.name,
-        path: item.path,
-        type: item.type,
-        value: Math.max(item.size_bytes, 0),
+        ...item,
+        value: Math.max(item.value, 1),
       })),
     };
 
     const root = d3
       .hierarchy(data)
-      .sum((d) => d.value || 0)
+      .sum((item) => item.value || 0)
       .sort((a, b) => (b.value || 0) - (a.value || 0));
 
     d3.treemap().size([width, height]).paddingInner(2)(root);
@@ -382,25 +473,16 @@
       .append("rect")
       .attr("width", (d) => Math.max(0, d.x1 - d.x0))
       .attr("height", (d) => Math.max(0, d.y1 - d.y0))
-      .attr("fill", (d) => (d.data.type === "dir" ? "#8ecae6" : "#ffb703"))
+      .attr("fill", (d) => d.data.color)
       .attr("stroke", "#ffffff")
-      .style("cursor", (d) => (d.data.type === "dir" ? "pointer" : "default"))
+      .style("cursor", (d) => (d.data.clickable ? "pointer" : "default"))
       .on("click", (_, d) => {
-        if (d.data.type === "dir") {
+        if (d.data.clickable) {
           loadPath(d.data.path).catch((err) => setScanState(`Navigation error: ${err.message}`));
         }
       })
       .on("mousemove", (event, d) => {
-        const percent =
-          childrenResponse.total_bytes > 0
-            ? ((d.value / childrenResponse.total_bytes) * 100).toFixed(2)
-            : "0.00";
-        showTooltip(event.clientX, event.clientY, [
-          `<strong>${escapeHtml(d.data.name)}</strong>`,
-          d.data.path,
-          `${formatBytes(d.value)} (${percent}%)`,
-          d.data.type,
-        ].join("<br>"));
+        showTooltip(event.clientX, event.clientY, d.data.tooltip);
       })
       .on("mouseleave", hideTooltip);
 
@@ -411,96 +493,155 @@
       .attr("y", 16)
       .text((d) => d.data.name)
       .style("display", (d) => {
-        const w = d.x1 - d.x0;
-        const h = d.y1 - d.y0;
-        return w > 90 && h > 28 ? "block" : "none";
+        const widthPx = d.x1 - d.x0;
+        const heightPx = d.y1 - d.y0;
+        return widthPx > 90 && heightPx > 28 ? "block" : "none";
       });
   }
 
+  function renderCompareSummary(diff) {
+    const summary = diff.summary || null;
+    els.compareMeta.hidden = false;
+    els.compareMeta.textContent = `Compare Base #${diff.base_scan_id} -> Target #${diff.target_scan_id}`;
+
+    if (!summary) {
+      els.compareSummary.hidden = true;
+      els.comparePathState.textContent = "";
+      return;
+    }
+
+    els.compareSummary.hidden = false;
+    const deltaClass = summary.delta_bytes >= 0 ? "delta-positive" : "delta-negative";
+    els.comparePathState.innerHTML = [
+      `<strong>${escapeHtml(summary.change_class)}</strong>`,
+      ` at ${escapeHtml(diff.path)}`,
+      ` | before ${formatOptionalBytes(summary.before_exists, summary.before_bytes)}`,
+      ` | after ${formatOptionalBytes(summary.after_exists, summary.after_bytes)}`,
+      ` | <span class="${deltaClass}">${escapeHtml(formatSignedBytes(summary.delta_bytes))}</span>`,
+      ` (${escapeHtml(formatPercentSigned(summary.delta_percent))})`,
+    ].join("");
+  }
+
+  function hideCompareSummary() {
+    els.compareMeta.hidden = true;
+    els.compareMeta.textContent = "";
+    els.compareSummary.hidden = true;
+    els.comparePathState.textContent = "";
+  }
+
+  function renderCompareTreemap(diff) {
+    const items = diff.items || [];
+    const totalVisual = items.reduce((sum, item) => sum + Math.max(item.visual_size_bytes || 0, 1), 0);
+    renderTreemapNodes(
+      diff.path,
+      totalVisual,
+      items.map((item) => ({
+        name: item.name,
+        path: item.path,
+        kind: item.type,
+        value: Math.max(item.visual_size_bytes || 0, 1),
+        color: compareColor(item.change_class),
+        clickable: item.type === "dir",
+        tooltip: [
+          `<strong>${escapeHtml(item.name)}</strong>`,
+          escapeHtml(item.path),
+          `${escapeHtml(item.type)} | ${escapeHtml(item.change_class)}`,
+          `Before: ${formatOptionalBytes(item.before_exists, item.before_bytes)}`,
+          `After: ${formatOptionalBytes(item.after_exists, item.after_bytes)}`,
+          `Delta: ${escapeHtml(formatSignedBytes(item.delta_bytes))} (${escapeHtml(formatPercentSigned(item.delta_percent))})`,
+          `Visual size: ${formatBytes(item.visual_size_bytes || 0)}`,
+        ].join("<br>"),
+      })),
+      "No changed items at this path for current compare filters."
+    );
+  }
+
   function renderLargest(items) {
-    els.largestTable.innerHTML = "";
+    els.detailTitle.textContent = "Largest Items";
+    setDetailColumns(["Name", "Type", "Size"]);
+    els.detailBody.innerHTML = "";
 
-    for (const item of items || []) {
+    for (const item of items) {
       const tr = document.createElement("tr");
-
       const nameTd = document.createElement("td");
-      const link = document.createElement("a");
-      link.textContent = item.name;
-      link.href = "#";
-      link.className = "cell-link";
-      link.addEventListener("click", (event) => {
-        event.preventDefault();
-        if (item.type === "dir") {
-          loadPath(item.path).catch((err) => setScanState(`Navigation error: ${err.message}`));
-        }
-      });
-      nameTd.appendChild(link);
+      nameTd.appendChild(createNameCell(item.name, item.path, item.type === "dir"));
 
       const typeTd = document.createElement("td");
       typeTd.textContent = item.type;
 
       const sizeTd = document.createElement("td");
-      sizeTd.textContent = formatBytes(item.size_bytes);
+      sizeTd.textContent = formatBytes(item.size_bytes || 0);
 
       tr.append(nameTd, typeTd, sizeTd);
-      els.largestTable.appendChild(tr);
+      els.detailBody.appendChild(tr);
     }
+
+    const hasRows = items.length > 0;
+    els.detailEmpty.hidden = hasRows;
+    els.detailEmpty.textContent = hasRows ? "" : "No items match the current filters.";
   }
 
-  function renderDiff(diff) {
-    els.growthTable.innerHTML = "";
-    els.shrinkTable.innerHTML = "";
-
-    if (!diff || !state.baseScanId || state.baseScanId === state.activeScanId) {
-      els.diffPanel.hidden = true;
-      return;
-    }
-
-    const items = diff.items || [];
-    const growth = items
-      .filter((item) => item.delta_bytes > 0)
-      .sort((a, b) => b.delta_bytes - a.delta_bytes)
-      .slice(0, 10);
-    const shrink = items
-      .filter((item) => item.delta_bytes < 0)
-      .sort((a, b) => a.delta_bytes - b.delta_bytes)
-      .slice(0, 10);
-
-    els.diffPanel.hidden = false;
-    els.diffMeta.textContent = `Base #${diff.base_scan_id} -> Target #${diff.target_scan_id} at ${diff.path}`;
-
-    const renderRow = (table, item, cssClass = "") => {
+  function renderCompareItems(items) {
+    els.detailTitle.textContent = "Changed Items";
+    setDetailColumns(["Name", "Type", "Before", "After", "Delta", "Change"]);
+    els.detailBody.innerHTML = "";
+    for (const item of items) {
       const tr = document.createElement("tr");
       const nameTd = document.createElement("td");
-      const nameLink = document.createElement("a");
-      nameLink.href = "#";
-      nameLink.className = `cell-link ${cssClass}`.trim();
-      nameLink.textContent = item.name;
-      nameLink.addEventListener("click", (event) => {
-        event.preventDefault();
-        loadPath(item.path).catch((err) => setScanState(`Navigation error: ${err.message}`));
-      });
-      nameTd.appendChild(nameLink);
+      nameTd.appendChild(createNameCell(item.name, item.path, item.type === "dir", `compare-link ${item.change_class}`));
+
+      const typeTd = document.createElement("td");
+      typeTd.textContent = item.type;
+
+      const beforeTd = document.createElement("td");
+      beforeTd.textContent = formatOptionalBytes(item.before_exists, item.before_bytes);
+
+      const afterTd = document.createElement("td");
+      afterTd.textContent = formatOptionalBytes(item.after_exists, item.after_bytes);
 
       const deltaTd = document.createElement("td");
-      deltaTd.textContent = formatSignedBytes(item.delta_bytes);
+      deltaTd.textContent = `${formatSignedBytes(item.delta_bytes)} (${formatPercentSigned(item.delta_percent)})`;
 
-      const pctTd = document.createElement("td");
-      pctTd.textContent = `${item.delta_percent.toFixed(2)}%`;
+      const changeTd = document.createElement("td");
+      const pill = document.createElement("span");
+      pill.className = `change-pill ${item.change_class}`;
+      pill.textContent = item.change_class;
+      changeTd.appendChild(pill);
 
-      tr.append(nameTd, deltaTd, pctTd);
-      table.appendChild(tr);
-    };
-
-    for (const item of growth) {
-      renderRow(els.growthTable, item);
-    }
-    for (const item of shrink) {
-      renderRow(els.shrinkTable, item, "warn");
+      tr.append(nameTd, typeTd, beforeTd, afterTd, deltaTd, changeTd);
+      els.detailBody.appendChild(tr);
     }
 
-    const hasRows = growth.length > 0 || shrink.length > 0;
-    els.diffEmpty.hidden = hasRows;
+    const hasRows = items.length > 0;
+    els.detailEmpty.hidden = hasRows;
+    els.detailEmpty.textContent = hasRows ? "" : "No changed items at this path for current compare filters.";
+  }
+
+  function createNameCell(name, path, clickable, className = "cell-link") {
+    if (!clickable) {
+      const span = document.createElement("span");
+      span.textContent = name;
+      return span;
+    }
+
+    const link = document.createElement("a");
+    link.href = "#";
+    link.className = className;
+    link.textContent = name;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      loadPath(path).catch((err) => setScanState(`Navigation error: ${err.message}`));
+    });
+    return link;
+  }
+
+  function setDetailColumns(columns) {
+    els.detailHead.innerHTML = "";
+    for (const label of columns) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      els.detailHead.appendChild(th);
+    }
   }
 
   function renderBreadcrumb(currentPath) {
@@ -531,8 +672,7 @@
       idTd.textContent = `#${scan.id}`;
 
       const statusTd = document.createElement("td");
-      const duration = formatScanDuration(scan);
-      statusTd.textContent = `${scan.status} (${duration})`;
+      statusTd.textContent = `${scan.status} (${formatScanDuration(scan)})`;
 
       const totalTd = document.createElement("td");
       totalTd.textContent = formatBytes(scan.total_bytes || 0);
@@ -545,7 +685,6 @@
       openButton.addEventListener("click", () => {
         openScan(scan.id).catch((err) => setScanState(`Open scan error: ${err.message}`));
       });
-
       actionsTd.appendChild(openButton);
 
       if (scan.status !== "running" && scan.status !== "queued") {
@@ -558,17 +697,13 @@
           try {
             await apiDelete(`/api/v1/scans/${scan.id}`);
             await loadHistory();
-
             if (scan.id === state.activeScanId) {
               const nextId = state.historyItems[0]?.id || null;
               if (nextId) {
                 await openScan(nextId, { preservePath: false });
               } else {
                 state.activeScanId = null;
-                state.currentPath = state.config.analyze_root;
-                els.chart.innerHTML = "";
-                els.largestTable.innerHTML = "";
-                renderDiff(null);
+                clearRenderedResults("No scan data available.");
                 setScanState("No scans yet");
               }
             }
@@ -601,14 +736,17 @@
       els.compareBaseSelect.appendChild(option);
     }
 
-    const hasSelected = completed.some((item) => String(item.id) === previousValue);
-    if (hasSelected) {
+    if (completed.some((item) => String(item.id) === previousValue)) {
       state.baseScanId = Number(previousValue);
       els.compareBaseSelect.value = previousValue;
     } else {
       state.baseScanId = null;
       els.compareBaseSelect.value = "";
     }
+
+    ensureValidSortForMode();
+    syncSortOptions();
+    syncFilterInputs();
   }
 
   function buildBreadcrumb(root, current) {
@@ -618,7 +756,6 @@
 
     const sep = root.includes("\\") ? "\\" : "/";
     const rootClean = root.endsWith(sep) && root.length > 1 ? root.slice(0, -1) : root;
-
     if (!current.startsWith(rootClean)) {
       return [{ label: current, path: current }];
     }
@@ -630,13 +767,11 @@
 
     const parts = rel.split(/[\\/]+/g);
     const breadcrumb = [{ label: rootClean, path: rootClean }];
-
     let acc = rootClean;
     for (const name of parts) {
       acc = acc.endsWith(sep) ? `${acc}${name}` : `${acc}${sep}${name}`;
       breadcrumb.push({ label: name, path: acc });
     }
-
     return breadcrumb;
   }
 
@@ -652,7 +787,7 @@
       return;
     }
 
-    els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | started: ${started} | finished: ${finished} | nodes: ${scan.total_nodes} | total: ${formatBytes(scan.total_bytes)} | warnings: ${scan.warning_count}`;
+    els.scanMeta.textContent = `Scan #${scan.id} | status: ${scan.status} | started: ${started} | finished: ${finished} | nodes: ${scan.total_nodes} | total: ${formatBytes(scan.total_bytes || 0)} | warnings: ${scan.warning_count || 0}`;
   }
 
   function showTooltip(x, y, html) {
@@ -675,13 +810,6 @@
     els.scanState.classList.toggle("running", running);
   }
 
-  function syncFilterInputs() {
-    els.searchInput.value = state.filters.q;
-    els.typeFilter.value = state.filters.type;
-    els.minSizeInput.value = String(state.filters.minSize || 0);
-    els.sortSelect.value = state.filters.sort || "size_desc";
-  }
-
   function syncUrlState() {
     const params = new URLSearchParams();
     if (state.activeScanId) {
@@ -702,7 +830,7 @@
     if (state.filters.minSize > 0) {
       params.set("min_size", String(state.filters.minSize));
     }
-    if (state.filters.sort && state.filters.sort !== "size_desc") {
+    if (state.filters.sort && state.filters.sort !== defaultSortForMode()) {
       params.set("sort", state.filters.sort);
     }
 
@@ -713,19 +841,14 @@
 
   function readUrlState() {
     const params = new URLSearchParams(window.location.search);
-    const scanId = parsePositiveInt(params.get("scan"));
-    const baseScanId = parsePositiveInt(params.get("base_scan"));
-    const minSize = Math.max(0, parsePositiveInt(params.get("min_size")) || 0);
-    const sort = params.get("sort") || "size_desc";
-
     return {
-      scanId,
-      baseScanId,
+      scanId: parsePositiveInt(params.get("scan")),
+      baseScanId: parsePositiveInt(params.get("base_scan")),
       path: params.get("path") || null,
       q: (params.get("q") || "").trim(),
       type: (params.get("type") || "").trim(),
-      minSize,
-      sort,
+      minSize: Math.max(0, parsePositiveInt(params.get("min_size")) || 0),
+      sort: (params.get("sort") || "").trim(),
     };
   }
 
@@ -739,7 +862,7 @@
 
   function basename(path) {
     const cleaned = path.replace(/[\\/]+$/, "");
-    const split = cleaned.split(/[\\/]/g);
+    const split = cleaned.split(/[\\/]+/g);
     return split[split.length - 1] || path;
   }
 
@@ -774,9 +897,7 @@
     const scannedDirs = progress?.scanned_dirs ?? 0;
     const scannedBytes = formatBytes(progress?.scanned_bytes ?? 0);
     const currentPath = progress?.current_path || state.config?.analyze_root || "-";
-    const updatedAt = progress?.updated_at
-      ? new Date(progress.updated_at).toLocaleTimeString()
-      : "awaiting first item";
+    const updatedAt = progress?.updated_at ? new Date(progress.updated_at).toLocaleTimeString() : "awaiting first item";
 
     els.scanLive.hidden = false;
     els.scanLive.dataset.state = scan.status;
@@ -853,8 +974,39 @@
     return `${prefix}${formatBytes(Math.abs(bytes))}`;
   }
 
+  function formatOptionalBytes(exists, bytes) {
+    return exists ? formatBytes(bytes || 0) : "-";
+  }
+
+  function formatPercent(part, total) {
+    if (!total) {
+      return "0.00%";
+    }
+    return `${((part / total) * 100).toFixed(2)}%`;
+  }
+
+  function formatPercentSigned(value) {
+    const numeric = Number(value || 0);
+    const prefix = numeric > 0 ? "+" : "";
+    return `${prefix}${numeric.toFixed(2)}%`;
+  }
+
+  function compareColor(changeClass) {
+    switch (changeClass) {
+      case "new":
+        return "#93c5fd";
+      case "removed":
+        return "#fdba74";
+      case "shrunk":
+        return "#fb923c";
+      case "grew":
+      default:
+        return "#6ee7b7";
+    }
+  }
+
   function escapeHtml(value) {
-    return value
+    return String(value)
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;")
@@ -891,4 +1043,3 @@
     }
   }
 })();
-

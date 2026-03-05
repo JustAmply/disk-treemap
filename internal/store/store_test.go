@@ -374,3 +374,84 @@ func TestNormalizeSortDefaultsToSizeDesc(t *testing.T) {
 		t.Fatalf("expected fallback sort, got %q", got)
 	}
 }
+
+func TestListDiffChildrenIncludesFilesDirsAndOmitsUnchanged(t *testing.T) {
+	st := newTestStore(t)
+
+	baseID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 220},
+		{Path: "/scanroot/docs", ParentPath: "/scanroot", Name: "docs", Kind: "dir", SizeBytes: 100},
+		{Path: "/scanroot/stable", ParentPath: "/scanroot", Name: "stable", Kind: "dir", SizeBytes: 10},
+		{Path: "/scanroot/old.log", ParentPath: "/scanroot", Name: "old.log", Kind: "file", SizeBytes: 40},
+		{Path: "/scanroot/report.txt", ParentPath: "/scanroot", Name: "report.txt", Kind: "file", SizeBytes: 20},
+	})
+	targetID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 365},
+		{Path: "/scanroot/docs", ParentPath: "/scanroot", Name: "docs", Kind: "dir", SizeBytes: 160},
+		{Path: "/scanroot/stable", ParentPath: "/scanroot", Name: "stable", Kind: "dir", SizeBytes: 10},
+		{Path: "/scanroot/new.txt", ParentPath: "/scanroot", Name: "new.txt", Kind: "file", SizeBytes: 95},
+		{Path: "/scanroot/report.txt", ParentPath: "/scanroot", Name: "report.txt", Kind: "file", SizeBytes: 25},
+	})
+
+	items, err := st.ListDiffChildren(context.Background(), targetID, baseID, "/scanroot", DiffQueryOptions{Limit: 10, Sort: "delta_desc"})
+	if err != nil {
+		t.Fatalf("list diff children: %v", err)
+	}
+	if len(items) != 4 {
+		t.Fatalf("expected 4 diff rows, got %d", len(items))
+	}
+
+	seen := map[string]DiffItem{}
+	for _, item := range items {
+		seen[item.Name+"|"+item.Kind] = item
+	}
+
+	docs := seen["docs|dir"]
+	if docs.ChangeClass != "grew" || docs.DeltaBytes != 60 || docs.VisualSizeBytes != 160 {
+		t.Fatalf("unexpected docs diff: %+v", docs)
+	}
+	oldLog := seen["old.log|file"]
+	if oldLog.ChangeClass != "removed" || oldLog.BeforeExists != true || oldLog.AfterExists != false {
+		t.Fatalf("unexpected removed file diff: %+v", oldLog)
+	}
+	newTxt := seen["new.txt|file"]
+	if newTxt.ChangeClass != "new" || newTxt.VisualSizeBytes != 95 {
+		t.Fatalf("unexpected new file diff: %+v", newTxt)
+	}
+	if _, ok := seen["stable|dir"]; ok {
+		t.Fatalf("unchanged item should be omitted: %+v", seen["stable|dir"])
+	}
+}
+
+func TestListDiffChildrenSupportsFiltersAndSizeSort(t *testing.T) {
+	st := newTestStore(t)
+
+	baseID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 150},
+		{Path: "/scanroot/a.txt", ParentPath: "/scanroot", Name: "a.txt", Kind: "file", SizeBytes: 5},
+		{Path: "/scanroot/logs", ParentPath: "/scanroot", Name: "logs", Kind: "dir", SizeBytes: 30},
+	})
+	targetID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 280},
+		{Path: "/scanroot/a.txt", ParentPath: "/scanroot", Name: "a.txt", Kind: "file", SizeBytes: 80},
+		{Path: "/scanroot/archive.txt", ParentPath: "/scanroot", Name: "archive.txt", Kind: "file", SizeBytes: 60},
+		{Path: "/scanroot/logs", ParentPath: "/scanroot", Name: "logs", Kind: "dir", SizeBytes: 90},
+	})
+
+	items, err := st.ListDiffChildren(context.Background(), targetID, baseID, "/scanroot", DiffQueryOptions{
+		Limit:   10,
+		Kind:    "file",
+		Query:   ".txt",
+		MinSize: 50,
+		Sort:    "size_desc",
+	})
+	if err != nil {
+		t.Fatalf("list filtered diff children: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 filtered diff rows, got %d", len(items))
+	}
+	if items[0].Name != "a.txt" || items[1].Name != "archive.txt" {
+		t.Fatalf("unexpected filtered order: %+v", items)
+	}
+}
