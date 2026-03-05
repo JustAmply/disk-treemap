@@ -9,7 +9,11 @@ Lightweight WizTree-like browser UI for disk usage analysis in Docker.
 - Single active scan lock
 - Root path constrained by `ANALYZE_ROOT`
 - SQLite-backed scan snapshots (`/data/scan.db`)
-- Treemap UI + largest-items table + breadcrumb drilldown
+- Scan history list with manual deletion and automatic retention cap
+- Compare explorer for changed files and directories across scan snapshots
+- Treemap UI + detail table + breadcrumb drilldown
+- Search/filter/sort on children and largest views
+- URL state for deep-linking (`scan`, `path`, `base_scan`, filters)
 - Distroless runtime image
 - Runs as root in-container for broader read access while scanning bind-mounted paths
 
@@ -28,6 +32,7 @@ Optional:
 - `SCAN_PROGRESS_INTERVAL_MS=200`
 - `SCAN_TIMEOUT=0` (seconds, `0` disables timeout)
 - `MAX_CHILDREN_PER_QUERY=500`
+- `SCAN_HISTORY_MAX_RUNS=50` (retains newest completed/failed scans)
 
 ## Run with Docker
 
@@ -59,14 +64,37 @@ docker compose up -d --build
 - `GET /api/v1/health`
 - `GET /api/v1/config`
 - `POST /api/v1/scans`
-- `GET /api/v1/scans/{scan_id}` (includes `progress` while running: current path, scanned nodes/files/dirs, scanned bytes)
-- `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>`
-- `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>`
+- `GET /api/v1/scans?limit=<n>&status=<queued|running|completed|failed>`
+- `GET /api/v1/scans/{scan_id}`
+- `DELETE /api/v1/scans/{scan_id}`
+- `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
+- `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
+- `GET /api/v1/scans/{target_scan_id}/diff?base_scan_id=<scan_id>&path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<delta_desc|delta_asc|size_desc|size_asc|name_asc|name_desc>`
+
+Diff response fields:
+
+- `summary` for the requested path itself
+- `items` for changed direct child files/directories under the requested path
+
+Fields per diff item:
+
+- `type`
+- `before_exists`
+- `after_exists`
+- `before_bytes`
+- `after_bytes`
+- `delta_bytes`
+- `delta_percent`
+- `visual_size_bytes`
+- `change_class` (`new`, `grew`, `shrunk`, `removed`, `unchanged`)
 
 Notes:
 
 - `path` must be absolute and inside `ANALYZE_ROOT`.
-- Children are sorted by `size_bytes DESC, name ASC`.
+- Children/largest sorting defaults to `size_desc`.
+- Diff compare sorting defaults to `delta_desc`.
+- Compare mode returns only changed direct children for the requested path; recurse by drilling into directories.
+- Removed directories remain browsable in compare mode if they still exist in the base scan.
 
 ## Local Development
 
@@ -91,4 +119,5 @@ If you need stricter capabilities policy, test carefully: dropping all capabilit
 - No NTFS MFT-level acceleration (filesystem walk only)
 - Symlinks are not followed
 - External authentication is expected (reverse proxy)
+- Compare mode is direct-child at each path; it does not perform rename detection
 
