@@ -249,3 +249,34 @@ func createCompletedScanWithNodes(t *testing.T, st *store.Store, root string, no
 	}
 	return scanID
 }
+
+func TestDiffEndpointValidatesBaseScanIDFormat(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	targetID := createCompletedScanWithNodes(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 1, MtimeUnix: 1}})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	endpoint := "/api/v1/scans/" + strconv.FormatInt(targetID, 10) + "/diff?base_scan_id=abc&path=" + url.QueryEscape(root)
+	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload["error"] != "invalid base_scan_id" {
+		t.Fatalf("expected invalid base_scan_id error, got %q", payload["error"])
+	}
+}

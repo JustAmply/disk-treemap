@@ -261,7 +261,11 @@ func (h *Handler) handleGetDiff(w http.ResponseWriter, r *http.Request, targetSc
 	}
 
 	baseScanID, err := parseInt64Query(r, "base_scan_id", 0)
-	if err != nil || baseScanID <= 0 {
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid base_scan_id")
+		return
+	}
+	if baseScanID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "base_scan_id is required")
 		return
 	}

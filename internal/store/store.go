@@ -300,7 +300,7 @@ func (s *Store) ListScanRuns(ctx context.Context, limit int, status string) ([]S
 		var run ScanRun
 		var startedAt, finishedAt sql.NullString
 		if err := rows.Scan(&run.ID, &startedAt, &finishedAt, &run.Status, &run.Error, &run.RootPath, &run.TotalBytes, &run.TotalNodes, &run.WarningCount); err != nil {
-			return nil, fmt.Errorf("scan scan run row: %w", err)
+			return nil, fmt.Errorf("scan scan_runs row: %w", err)
 		}
 		attachScanTimestamps(&run, startedAt, finishedAt)
 		runs = append(runs, run)
@@ -362,13 +362,22 @@ func (s *Store) PruneCompletedFailedScans(ctx context.Context, keepMax int) ([]i
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	query := `DELETE FROM scan_runs WHERE id IN (` + strings.Join(makePlaceholders(len(ids)), ",") + `)`
-	args := make([]any, 0, len(ids))
-	for _, id := range ids {
-		args = append(args, id)
-	}
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-		return nil, fmt.Errorf("delete pruned scan runs: %w", err)
+	for start := 0; start < len(ids); start += sqliteMaxBindParameters {
+		end := start + sqliteMaxBindParameters
+		if end > len(ids) {
+			end = len(ids)
+		}
+
+		chunk := ids[start:end]
+		query := `DELETE FROM scan_runs WHERE id IN (` + strings.Join(makePlaceholders(len(chunk)), ",") + `)`
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return nil, fmt.Errorf("delete pruned scan runs: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

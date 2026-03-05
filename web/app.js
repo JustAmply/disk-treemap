@@ -143,9 +143,18 @@
   }
 
   async function openScan(scanId, { preservePath = false } = {}) {
-    const selected = state.historyItems.find((item) => item.id === scanId);
+    let selected = state.historyItems.find((item) => item.id === scanId);
     if (!selected) {
-      throw new Error(`scan #${scanId} not found`);
+      try {
+        selected = await apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
+        upsertHistoryScan(selected);
+      } catch {
+        if (!state.historyItems || state.historyItems.length === 0) {
+          throw new Error(`scan #${scanId} not found`);
+        }
+        selected = state.historyItems[0];
+        scanId = selected.id;
+      }
     }
 
     state.activeScanId = scanId;
@@ -172,7 +181,7 @@
 
     if (selected.status === "failed") {
       setScanState(`Failed: ${selected.error || "unknown error"}`);
-      renderDiff(null);
+      clearRenderedResults(`Scan #${selected.id} failed. No data to display.`);
       return;
     }
 
@@ -234,6 +243,7 @@
         if (scan.status === "failed") {
           clearLiveStatus();
           setScanState(`Failed: ${scan.error || "unknown error"}`);
+          clearRenderedResults(`Scan #${scan.id} failed. No data to display.`);
           disableScanButton(false);
           state.pollingHandle = null;
           await loadHistory();
@@ -310,6 +320,17 @@
     syncUrlState();
   }
 
+  function clearRenderedResults(message = "No scan data available.") {
+    state.currentPath = state.config?.analyze_root || null;
+    els.chart.innerHTML = "";
+    els.chartHint.hidden = false;
+    els.chartHint.textContent = message;
+    els.breadcrumb.innerHTML = "";
+    els.largestTable.innerHTML = "";
+    els.scanMeta.textContent = message;
+    renderDiff(null);
+    syncUrlState();
+  }
   function renderTreemap(childrenResponse) {
     els.chart.innerHTML = "";
 
@@ -870,3 +891,4 @@
     }
   }
 })();
+
