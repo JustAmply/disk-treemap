@@ -25,28 +25,87 @@
   </header>
 
   <main class="layout">
+    <section class="panel controls-panel">
+      <div class="controls-row">
+        <label>
+          Compare to scan
+          <select id="compareBaseSelect">
+            <option value="">None</option>
+          </select>
+        </label>
+        <button id="clearCompareButton" type="button" class="secondary">Clear Compare</button>
+      </div>
+      <div class="controls-row filters">
+        <label>
+          Search
+          <input id="searchInput" type="text" placeholder="name contains..." />
+        </label>
+        <label>
+          Type
+          <select id="typeFilter">
+            <option value="">All</option>
+            <option value="dir">Dirs</option>
+            <option value="file">Files</option>
+          </select>
+        </label>
+        <label>
+          Min bytes
+          <input id="minSizeInput" type="number" min="0" step="1" value="0" />
+        </label>
+        <label>
+          Sort
+          <select id="sortSelect"></select>
+        </label>
+        <button id="applyFiltersButton" type="button">Apply</button>
+        <button id="resetFiltersButton" type="button" class="secondary">Reset</button>
+      </div>
+    </section>
+
     <section class="panel chart-panel">
       <div class="panel-head">
-        <h2>Treemap</h2>
+        <div>
+          <h2>Treemap</h2>
+          <p id="compareMeta" class="hint" hidden></p>
+        </div>
         <div id="breadcrumb" class="breadcrumb"></div>
+      </div>
+      <div id="compareSummary" class="compare-summary" hidden>
+        <div id="comparePathState" class="compare-path-state"></div>
       </div>
       <div id="chart"></div>
       <p id="chartHint" class="hint">Run a scan to view file sizes.</p>
     </section>
 
     <aside class="panel side-panel">
-      <h2>Largest Items</h2>
-      <p id="scanMeta" class="hint">No scan data yet.</p>
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Size</th>
-          </tr>
-        </thead>
-        <tbody id="largestTable"></tbody>
-      </table>
+      <section>
+        <div class="panel-head">
+          <h2>Scan History</h2>
+          <button id="refreshHistoryButton" type="button" class="secondary">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Status</th>
+              <th>Total</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="historyTable"></tbody>
+        </table>
+      </section>
+
+      <section>
+        <h2 id="detailTitle">Largest Items</h2>
+        <p id="scanMeta" class="hint">No scan data yet.</p>
+        <table>
+          <thead>
+            <tr id="detailHead"></tr>
+          </thead>
+          <tbody id="detailBody"></tbody>
+        </table>
+        <p id="detailEmpty" class="hint" hidden></p>
+      </section>
     </aside>
   </main>
 

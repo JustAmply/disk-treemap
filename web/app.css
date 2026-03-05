@@ -6,6 +6,11 @@
   --muted: #6b7280;
   --accent: #0f766e;
   --accent-strong: #115e59;
+  --warn: #c2410c;
+  --compare-new: #1d4ed8;
+  --compare-grew: #0f766e;
+  --compare-shrunk: #c2410c;
+  --compare-removed: #7c2d12;
 }
 
 * {
@@ -19,17 +24,9 @@ body {
   background: radial-gradient(circle at top right, #fefae0, var(--bg));
 }
 
-.topbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.8);
-  backdrop-filter: blur(4px);
-}
-
-h1, h2 {
+h1,
+h2,
+h3 {
   margin: 0;
 }
 
@@ -39,6 +36,21 @@ h1 {
 
 h2 {
   font-size: 1rem;
+}
+
+h3 {
+  font-size: 0.9rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(4px);
 }
 
 .scan-live {
@@ -78,6 +90,12 @@ h2 {
   gap: 0.75rem;
 }
 
+button,
+select,
+input {
+  font: inherit;
+}
+
 button {
   border: none;
   background: var(--accent);
@@ -88,8 +106,17 @@ button {
   font-weight: 600;
 }
 
+button.secondary {
+  background: #e8f3f1;
+  color: #12534f;
+}
+
 button:hover {
   background: var(--accent-strong);
+}
+
+button.secondary:hover {
+  background: #d6e8e4;
 }
 
 button[disabled] {
@@ -132,7 +159,7 @@ button[disabled] {
 
 .layout {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 1.65fr 1fr;
   gap: 1rem;
   padding: 1rem;
 }
@@ -142,6 +169,41 @@ button[disabled] {
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   padding: 0.75rem;
+}
+
+.controls-panel {
+  grid-column: 1 / 2;
+}
+
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: end;
+}
+
+.controls-row + .controls-row {
+  margin-top: 0.6rem;
+}
+
+.controls-row label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.controls-row input,
+.controls-row select {
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: #fff;
+  color: var(--text);
+  padding: 0.4rem 0.45rem;
+}
+
+.filters label {
+  min-width: 130px;
 }
 
 .panel-head {
@@ -169,10 +231,39 @@ button[disabled] {
 
 #chart {
   width: 100%;
-  min-height: 60vh;
+  min-height: 48vh;
   border: 1px solid var(--border);
   border-radius: 0.5rem;
   overflow: hidden;
+}
+
+.compare-summary {
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.6rem;
+  background: linear-gradient(135deg, #eff6ff, #f8fafc);
+}
+
+.compare-path-state {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.compare-path-state .delta-positive {
+  color: var(--compare-grew);
+}
+
+.compare-path-state .delta-negative {
+  color: var(--compare-shrunk);
+}
+
+.side-panel {
+  grid-column: 2 / 3;
+  grid-row: 1 / span 2;
+  display: grid;
+  gap: 1rem;
+  align-content: start;
 }
 
 .hint {
@@ -186,11 +277,13 @@ table {
   margin-top: 0.5rem;
 }
 
-th, td {
+th,
+td {
   text-align: left;
   border-bottom: 1px solid #ece9de;
   font-size: 0.85rem;
   padding: 0.45rem 0.25rem;
+  vertical-align: top;
 }
 
 tbody tr:hover {
@@ -200,6 +293,52 @@ tbody tr:hover {
 .cell-link {
   color: #0f4c81;
   text-decoration: none;
+}
+
+.change-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.change-pill.new {
+  color: var(--compare-new);
+  background: #dbeafe;
+}
+
+.change-pill.grew {
+  color: var(--compare-grew);
+  background: #d1fae5;
+}
+
+.change-pill.shrunk {
+  color: var(--compare-shrunk);
+  background: #ffedd5;
+}
+
+.change-pill.removed {
+  color: var(--compare-removed);
+  background: #fed7aa;
+}
+
+.compare-link.new {
+  color: var(--compare-new);
+}
+
+.compare-link.grew {
+  color: var(--compare-grew);
+}
+
+.compare-link.shrunk {
+  color: var(--compare-shrunk);
+}
+
+.compare-link.removed {
+  color: var(--compare-removed);
 }
 
 .tooltip {
@@ -220,12 +359,14 @@ tbody tr:hover {
   pointer-events: none;
 }
 
-@media (max-width: 1000px) {
+@media (max-width: 1240px) {
   .layout {
     grid-template-columns: 1fr;
   }
 
-  #chart {
-    min-height: 50vh;
+  .controls-panel,
+  .side-panel {
+    grid-column: 1 / 2;
+    grid-row: auto;
   }
 }
