@@ -18,7 +18,6 @@ const (
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500
-	defaultScanHistoryMaxRuns  = 50
 )
 
 type Config struct {
@@ -30,7 +29,6 @@ type Config struct {
 	ScanProgressInterval time.Duration
 	ScanTimeout          time.Duration
 	MaxChildrenPerQuery  int
-	ScanHistoryMaxRuns   int
 }
 
 func LoadFromEnv() (Config, error) {
@@ -42,7 +40,6 @@ func LoadFromEnv() (Config, error) {
 		ScanWriteBatchSize:   defaultScanWriteBatchSize,
 		ScanProgressInterval: time.Duration(defaultScanProgressMS) * time.Millisecond,
 		MaxChildrenPerQuery:  defaultMaxChildrenPerQuery,
-		ScanHistoryMaxRuns:   defaultScanHistoryMaxRuns,
 	}
 
 	if cfg.AnalyzeRoot == "" {
@@ -93,14 +90,6 @@ func LoadFromEnv() (Config, error) {
 	}
 	if cfg.MaxChildrenPerQuery < 1 {
 		cfg.MaxChildrenPerQuery = defaultMaxChildrenPerQuery
-	}
-
-	cfg.ScanHistoryMaxRuns, err = parseIntEnv("SCAN_HISTORY_MAX_RUNS", defaultScanHistoryMaxRuns)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.ScanHistoryMaxRuns < 1 {
-		cfg.ScanHistoryMaxRuns = defaultScanHistoryMaxRuns
 	}
 
 	if err := validateAnalyzeRoot(cfg.AnalyzeRoot); err != nil {

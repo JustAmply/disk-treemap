@@ -53,7 +53,12 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	latest, err := h.svc.GetLatestScanRun(r.Context())
+	current, err := h.svc.GetCurrentScanRun(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	latestCompleted, err := h.svc.GetLatestCompletedScanRun(r.Context())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -68,20 +73,17 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"scan_progress_interval_ms": int(h.cfg.ScanProgressInterval / time.Millisecond),
 		"scan_timeout_seconds":      int(h.cfg.ScanTimeout.Seconds()),
 		"max_children_per_query":    h.cfg.MaxChildrenPerQuery,
-		"scan_history_max_runs":     h.cfg.ScanHistoryMaxRuns,
-		"latest_scan":               latest,
+		"current_scan":              current,
+		"latest_completed_scan":     latestCompleted,
 	})
 }
 
 func (h *Handler) handleScans(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		h.handleStartScan(w, r)
-	case http.MethodGet:
-		h.handleListScans(w, r)
-	default:
+	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
 	}
+	h.handleStartScan(w, r)
 }
 
 func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {
@@ -96,23 +98,6 @@ func (h *Handler) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"scan_id": scanID})
-}
-
-func (h *Handler) handleListScans(w http.ResponseWriter, r *http.Request) {
-	limit, err := parseIntQuery(r, "limit", 50)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-
-	runs, err := h.svc.ListScans(r.Context(), limit, status)
-	if err != nil {
-		h.handleDomainError(w, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"items": runs})
 }
 
 func (h *Handler) handleScanRoutes(w http.ResponseWriter, r *http.Request) {
@@ -131,14 +116,11 @@ func (h *Handler) handleScanRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(parts) == 1 {
-		switch r.Method {
-		case http.MethodGet:
-			h.handleGetScan(w, r, scanID)
-		case http.MethodDelete:
-			h.handleDeleteScan(w, r, scanID)
-		default:
+		if r.Method != http.MethodGet {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
 		}
+		h.handleGetScan(w, r, scanID)
 		return
 	}
 	if len(parts) != 2 {
@@ -151,8 +133,6 @@ func (h *Handler) handleScanRoutes(w http.ResponseWriter, r *http.Request) {
 		h.handleGetChildren(w, r, scanID)
 	case "largest":
 		h.handleGetLargest(w, r, scanID)
-	case "diff":
-		h.handleGetDiff(w, r, scanID)
 	default:
 		writeJSONError(w, http.StatusNotFound, "not found")
 	}
@@ -175,19 +155,6 @@ func (h *Handler) handleGetScan(w http.ResponseWriter, r *http.Request, scanID i
 	}
 
 	writeJSON(w, http.StatusOK, run)
-}
-
-func (h *Handler) handleDeleteScan(w http.ResponseWriter, r *http.Request, scanID int64) {
-	if r.Method != http.MethodDelete {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	if err := h.svc.DeleteScan(r.Context(), scanID); err != nil {
-		h.handleDomainError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) handleGetChildren(w http.ResponseWriter, r *http.Request, scanID int64) {
@@ -254,48 +221,6 @@ func (h *Handler) handleGetLargest(w http.ResponseWriter, r *http.Request, scanI
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (h *Handler) handleGetDiff(w http.ResponseWriter, r *http.Request, targetScanID int64) {
-	if r.Method != http.MethodGet {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	baseScanID, err := parseInt64Query(r, "base_scan_id", 0)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid base_scan_id")
-		return
-	}
-	if baseScanID <= 0 {
-		writeJSONError(w, http.StatusBadRequest, "base_scan_id is required")
-		return
-	}
-
-	limit, err := parseIntQuery(r, "limit", 100)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	minSize, err := parseInt64Query(r, "min_size", 0)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	resp, err := h.svc.GetDirectoryDiff(r.Context(), targetScanID, baseScanID, r.URL.Query().Get("path"), app.NodeQueryOptions{
-		Limit:   limit,
-		Query:   strings.TrimSpace(r.URL.Query().Get("q")),
-		Kind:    strings.TrimSpace(r.URL.Query().Get("type")),
-		MinSize: minSize,
-		Sort:    strings.TrimSpace(r.URL.Query().Get("sort")),
-	})
-	if err != nil {
-		h.handleDomainError(w, err)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
 func (h *Handler) handleDomainError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, pathutil.ErrPathNotAbsolute), errors.Is(err, pathutil.ErrPathOutsideRoot):
@@ -323,7 +248,7 @@ func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Path == "/history" || r.URL.Path == "/history/" {
-		http.ServeFile(w, r, filepath.Join(h.staticRoot, "history.html"))
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 		return
 	}
 

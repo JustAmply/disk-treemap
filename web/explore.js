@@ -45,8 +45,9 @@
 
   const state = {
     config: null,
-    activeScanId: null,
-    latestScan: null,
+    currentScan: null,
+    latestCompletedScan: null,
+    viewedScanId: null,
     currentPath: null,
     currentView: null,
     pathLoading: false,
@@ -78,6 +79,8 @@
 
     const cfg = await App.apiGet("/api/v1/config");
     state.config = cfg;
+    state.currentScan = cfg.current_scan || null;
+    state.latestCompletedScan = cfg.latest_completed_scan || null;
     state.currentPath = state.urlState.path || cfg.analyze_root;
     state.filters = {
       q: state.urlState.q || "",
@@ -87,16 +90,14 @@
     };
 
     syncFilterInputs();
-    renderRootPath();
+    renderAll();
 
-    const desiredScanId = state.urlState.scanId || cfg.latest_scan?.id || null;
+    const desiredScanId = chooseInitialViewScanId();
     if (!desiredScanId) {
-      App.renderStatusChip(els.scanState, null);
-      renderAll();
       return;
     }
 
-    await openScan(desiredScanId, { preservePath: true });
+    await openViewScan(desiredScanId, { preservePath: true, fallbackOnMissing: true });
   }
 
   function bindEvents() {
@@ -127,6 +128,19 @@
     window.addEventListener("resize", scheduleTreemapRender);
   }
 
+  function chooseInitialViewScanId() {
+    if (state.urlState.scanId) {
+      return state.urlState.scanId;
+    }
+    if (state.currentScan?.status === "completed") {
+      return state.currentScan.id;
+    }
+    if (state.latestCompletedScan?.id) {
+      return state.latestCompletedScan.id;
+    }
+    return null;
+  }
+
   function renderAll() {
     renderRootPath();
     renderBanner();
@@ -136,6 +150,7 @@
     renderBreadcrumb();
     renderDetailList();
     renderChartArea();
+    App.renderStatusChip(els.scanState, state.currentScan || state.latestCompletedScan || null);
   }
 
   function renderRootPath() {
@@ -149,7 +164,7 @@
   }
 
   function renderBanner() {
-    const scan = state.latestScan;
+    const scan = state.currentScan;
     if (!scan || !App.isScanActive(scan)) {
       els.scanBanner.hidden = true;
       els.scanBannerSummary.textContent = "";
@@ -178,34 +193,33 @@
   }
 
   function renderSummary() {
-    const scan = state.latestScan;
-    const currentPath = state.pathLoading
+    const activePath = state.pathLoading
       ? state.currentPath || state.currentView?.path || state.config?.analyze_root || "Not scanned yet"
       : state.currentView?.path || state.currentPath || state.config?.analyze_root || "Not scanned yet";
 
     let size = "-";
     if (state.currentView) {
       size = App.formatBytes(state.currentView.totalBytes);
-    } else if (scan?.status === "completed") {
-      size = App.formatBytes(scan.total_bytes || 0);
-    } else if (scan?.progress) {
-      size = App.formatBytes(scan.progress.scanned_bytes || 0);
+    } else if (state.latestCompletedScan?.status === "completed") {
+      size = App.formatBytes(state.latestCompletedScan.total_bytes || 0);
+    } else if (state.currentScan?.progress) {
+      size = App.formatBytes(state.currentScan.progress.scanned_bytes || 0);
     }
 
     let itemText = "-";
     if (state.currentView) {
       itemText = `${state.currentView.itemCount} visible`;
-    } else if (scan?.progress) {
-      itemText = `${scan.progress.scanned_nodes} scanned`;
-    } else if (scan?.status === "completed") {
-      itemText = `${scan.total_nodes} total`;
+    } else if (state.currentScan?.progress) {
+      itemText = `${state.currentScan.progress.scanned_nodes} scanned`;
+    } else if (state.latestCompletedScan?.status === "completed") {
+      itemText = `${state.latestCompletedScan.total_nodes} total`;
     }
 
-    els.summaryPath.textContent = currentPath;
-    els.summaryPath.title = currentPath;
+    els.summaryPath.textContent = activePath;
+    els.summaryPath.title = activePath;
     els.summarySize.textContent = size;
     els.summaryItems.textContent = itemText;
-    els.summaryScan.textContent = App.buildScanSummaryText(scan);
+    els.summaryScan.textContent = App.buildScanSummaryText(state.currentScan || state.latestCompletedScan);
   }
 
   function renderAlert() {
@@ -219,7 +233,7 @@
     els.appAlert.hidden = false;
     els.appAlertText.textContent = state.alert.message;
     els.alertRetryButton.hidden = !state.alert.retry;
-    els.alertRetryButton.disabled = App.isScanActive(state.latestScan);
+    els.alertRetryButton.disabled = App.isScanActive(state.currentScan);
   }
 
   function renderToolbarState() {
@@ -253,10 +267,10 @@
 
     if (!state.currentView) {
       els.detailTitle.textContent = "Largest items";
-      els.detailSummary.textContent = App.isScanActive(state.latestScan) ? "Scan in progress." : "No scan data yet.";
+      els.detailSummary.textContent = App.isScanActive(state.currentScan) ? "Scan in progress." : "No scan data yet.";
       els.detailEmpty.hidden = false;
-      els.detailEmpty.textContent = App.isScanActive(state.latestScan)
-        ? "The ranked item list will appear after the scan completes."
+      els.detailEmpty.textContent = App.isScanActive(state.currentScan)
+        ? "The ranked item list will appear after the first completed scan."
         : "Run a scan to inspect folders and files.";
       els.inspectorMeta.textContent = "Largest items in the current view.";
       return;
@@ -284,43 +298,43 @@
       return;
     }
 
-    if (!state.currentView) {
-      if (App.isScanActive(state.latestScan)) {
-        showEmptyState(
-          "Scan in progress",
-          "The treemap will appear here as soon as the first completed scan is ready.",
-          false,
-        );
+    if (state.currentView) {
+      if (!state.currentView.chartItems.length) {
+        showChartMessage(state.currentView.emptyChartMessage);
         return;
       }
 
-      if (state.latestScan?.status === "failed") {
-        showEmptyState(
-          "Scan failed",
-          "Run another scan to rebuild the treemap for this root path.",
-          true,
-        );
-        return;
-      }
+      els.chartFrame.dataset.view = "chart";
+      els.chartEmpty.hidden = true;
+      els.chartMessage.hidden = true;
+      els.chart.hidden = false;
+      App.renderTreemap(els.chart, els.tooltip, state.currentView, navigateToPath);
+      return;
+    }
 
+    if (App.isScanActive(state.currentScan)) {
       showEmptyState(
-        "Run a scan to map this folder",
-        "Scan the configured root path to build a treemap and inspect the current scan in context.",
+        "Scan in progress",
+        "The treemap will appear here as soon as the first completed scan is ready.",
+        false,
+      );
+      return;
+    }
+
+    if (state.currentScan?.status === "failed") {
+      showEmptyState(
+        "Scan failed",
+        "Run another scan to rebuild the treemap for this root path.",
         true,
       );
       return;
     }
 
-    if (!state.currentView.chartItems.length) {
-      showChartMessage(state.currentView.emptyChartMessage);
-      return;
-    }
-
-    els.chartFrame.dataset.view = "chart";
-    els.chartEmpty.hidden = true;
-    els.chartMessage.hidden = true;
-    els.chart.hidden = false;
-    App.renderTreemap(els.chart, els.tooltip, state.currentView, navigateToPath);
+    showEmptyState(
+      "Run a scan to map this folder",
+      "Scan the configured root path to build a treemap and inspect the current scan in context.",
+      true,
+    );
   }
 
   function showEmptyState(title, body, showAction) {
@@ -331,7 +345,7 @@
     els.chartMessage.hidden = true;
     els.chart.hidden = true;
     els.emptyScanButton.hidden = !showAction;
-    els.emptyScanButton.disabled = App.isScanActive(state.latestScan);
+    els.emptyScanButton.disabled = App.isScanActive(state.currentScan);
     App.clearChildren(els.chart);
   }
 
@@ -345,79 +359,79 @@
   }
 
   async function runScan() {
-    if (App.isScanActive(state.latestScan)) {
+    if (App.isScanActive(state.currentScan)) {
       return;
     }
 
     clearPolling();
     state.alert = null;
-    state.currentView = null;
-    state.pathLoading = false;
-    state.currentPath = state.config?.analyze_root || state.currentPath;
-    state.latestScan = {
-      id: state.latestScan?.id ?? null,
+    state.currentScan = {
+      id: state.currentScan?.id ?? null,
       status: "queued",
       warning_count: 0,
       progress: null,
     };
-    renderStatusState(state.latestScan);
+    renderAll();
 
     try {
       const result = await App.apiPost("/api/v1/scans");
-      state.activeScanId = result.scan_id;
-      state.latestScan = {
+      state.currentScan = {
         id: result.scan_id,
         status: "queued",
         warning_count: 0,
         progress: null,
       };
-      renderStatusState(state.latestScan);
+      renderAll();
       startPolling(result.scan_id);
       syncUrlState();
     } catch (err) {
-      state.latestScan = {
-        ...state.latestScan,
+      state.currentScan = {
+        ...state.currentScan,
         status: "failed",
         error: err.message,
       };
       showAlert(`Could not start a new scan: ${err.message}`, true);
-      renderStatusState(state.latestScan);
+      renderAll();
     }
   }
 
-  async function openScan(scanId, { preservePath = false } = {}) {
-    const selected = await App.apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
-    state.activeScanId = scanId;
-    state.latestScan = selected;
-    renderStatusState(selected);
+  async function openViewScan(scanId, { preservePath = false, fallbackOnMissing = false } = {}) {
+    try {
+      const selected = await App.apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
+      state.viewedScanId = scanId;
 
-    if (App.isScanActive(selected)) {
+      if (selected.status === "completed") {
+        if (!state.latestCompletedScan || selected.id >= state.latestCompletedScan.id) {
+          state.latestCompletedScan = selected;
+        }
+        const targetPath = preservePath && state.currentPath ? state.currentPath : state.config?.analyze_root || state.currentPath;
+        await loadPath(targetPath);
+        return;
+      }
+
+      if (selected.id === state.currentScan?.id || !state.currentScan) {
+        state.currentScan = selected;
+      }
       state.currentView = null;
-      renderChartArea();
-      startPolling(scanId);
+      renderAll();
       syncUrlState();
-      return;
+    } catch (err) {
+      if (!fallbackOnMissing) {
+        throw err;
+      }
+
+      const fallbackScanId = state.latestCompletedScan?.id && state.latestCompletedScan.id !== scanId
+        ? state.latestCompletedScan.id
+        : null;
+      if (!fallbackScanId) {
+        showAlert(`Could not open scan #${scanId}: ${err.message}`);
+        renderAll();
+        return;
+      }
+
+      showAlert(`Scan #${scanId} is no longer available. Showing the latest completed scan instead.`);
+      await openViewScan(fallbackScanId, { preservePath: true, fallbackOnMissing: false });
     }
-
-    clearPolling();
-    disableScanButtons(false);
-
-    if (selected.status === "failed") {
-      state.currentView = null;
-      showAlert(`Scan #${selected.id} failed: ${selected.error || "unknown error"}`, true);
-      renderStatusState(selected);
-      syncUrlState();
-      return;
-    }
-
-    if (selected.status === "completed") {
-      state.alert = null;
-      const targetPath = preservePath && state.currentPath ? state.currentPath : state.config?.analyze_root || state.currentPath;
-      await loadPath(targetPath);
-      return;
-    }
-
-    syncUrlState();
   }
 
   function startPolling(scanId) {
@@ -427,14 +441,15 @@
     const poll = async () => {
       try {
         const scan = await App.apiGet(`/api/v1/scans/${scanId}`);
-        state.latestScan = scan;
-        state.activeScanId = scan.id;
-        renderStatusState(scan);
+        state.currentScan = scan;
+        renderAll();
 
         if (scan.status === "completed") {
           clearPolling();
           disableScanButtons(false);
           App.logScanWarnings(scan);
+          state.latestCompletedScan = scan;
+          state.viewedScanId = scan.id;
           state.currentPath = state.config?.analyze_root || state.currentPath;
           await loadPath(state.currentPath);
           return;
@@ -443,9 +458,8 @@
         if (scan.status === "failed") {
           clearPolling();
           disableScanButtons(false);
-          state.currentView = null;
           showAlert(`Scan failed: ${scan.error || "unknown error"}`, true);
-          renderStatusState(scan);
+          renderAll();
           return;
         }
 
@@ -465,7 +479,7 @@
   }
 
   async function reloadCurrentPath() {
-    if (!state.activeScanId) {
+    if (!state.viewedScanId) {
       syncUrlState();
       renderAll();
       return;
@@ -475,7 +489,7 @@
   }
 
   async function loadPath(path) {
-    if (!state.activeScanId || state.latestScan?.status !== "completed") {
+    if (!state.viewedScanId) {
       return;
     }
 
@@ -495,8 +509,8 @@
       });
 
       const [children, largest] = await Promise.all([
-        App.apiGet(`/api/v1/scans/${state.activeScanId}/children?${query.toString()}`),
-        App.apiGet(`/api/v1/scans/${state.activeScanId}/largest?${query.toString()}`),
+        App.apiGet(`/api/v1/scans/${state.viewedScanId}/children?${query.toString()}`),
+        App.apiGet(`/api/v1/scans/${state.viewedScanId}/largest?${query.toString()}`),
       ]);
 
       state.currentView = buildNormalView(children, largest.items || []);
@@ -542,15 +556,9 @@
     };
   }
 
-  function renderStatusState(scan) {
-    disableScanButtons(App.isScanActive(scan));
-    App.renderStatusChip(els.scanState, scan);
-    renderAll();
-  }
-
   function syncSortOptions() {
     App.clearChildren(els.sortSelect);
-    App.sortOptions.normal.forEach((optionDef) => {
+    App.sortOptions.forEach((optionDef) => {
       const option = document.createElement("option");
       option.value = optionDef.value;
       option.textContent = optionDef.label;
@@ -621,7 +629,7 @@
 
   function syncUrlState() {
     App.replaceUrl("/", {
-      scan: state.activeScanId || null,
+      scan: state.viewedScanId || null,
       path: state.currentPath || null,
       q: state.filters.q || null,
       type: state.filters.type || null,

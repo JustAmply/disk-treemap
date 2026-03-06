@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,6 +120,32 @@ func (d *duplicateNodeScanner) Scan(ctx context.Context, cb scan.NodeCallback) (
 		return scan.Result{}, err
 	}
 	return scan.Result{TotalBytes: 2, TotalNodes: 3}, nil
+}
+
+type singleNodeScanner struct {
+	root string
+}
+
+func (s *singleNodeScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
+	if err := cb(scan.NodeRecord{
+		Path:       s.root,
+		ParentPath: "",
+		Name:       filepath.Base(s.root),
+		Kind:       "dir",
+		SizeBytes:  1,
+		MtimeUnix:  time.Now().Unix(),
+	}); err != nil {
+		return scan.Result{}, err
+	}
+	return scan.Result{TotalBytes: 1, TotalNodes: 1}, nil
+}
+
+type failingScanner struct {
+	err error
+}
+
+func (f *failingScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
+	return scan.Result{}, f.err
 }
 
 func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
@@ -307,6 +334,124 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	}
 }
 
+func TestServicePrunesToNewestCompletedScan(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+			{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: int64(i + 1), MtimeUnix: 1},
+		})
+	}
+
+	svc := NewService(cfg, st)
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &singleNodeScanner{root: root}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	run := waitForScanStatus(t, st, scanID)
+	if run.Status != "completed" {
+		t.Fatalf("expected completed, got %s", run.Status)
+	}
+
+	current, err := svc.GetCurrentScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get current scan: %v", err)
+	}
+	latestCompleted, err := svc.GetLatestCompletedScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get latest completed scan: %v", err)
+	}
+	if current == nil || latestCompleted == nil || current.ID != latestCompleted.ID {
+		t.Fatalf("expected current and latest completed to match, got current=%+v latestCompleted=%+v", current, latestCompleted)
+	}
+
+	if deleted, err := st.PruneOperationalScans(context.Background()); err != nil {
+		t.Fatalf("prune operational scans: %v", err)
+	} else if len(deleted) != 0 {
+		t.Fatalf("expected store to already be pruned, deleted=%v", deleted)
+	}
+}
+
+func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	completedID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 10, MtimeUnix: 1},
+	})
+
+	svc := NewService(cfg, st)
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &failingScanner{err: fmt.Errorf("boom")}
+	})
+
+	failedID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	run := waitForScanStatus(t, st, failedID)
+	if run.Status != "failed" {
+		t.Fatalf("expected failed, got %s", run.Status)
+	}
+
+	latestCompleted, err := svc.GetLatestCompletedScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get latest completed scan: %v", err)
+	}
+	if latestCompleted == nil || latestCompleted.ID != completedID {
+		t.Fatalf("expected completed scan %d to be preserved, got %+v", completedID, latestCompleted)
+	}
+
+	current, err := svc.GetCurrentScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get current scan: %v", err)
+	}
+	if current == nil || current.ID != failedID || current.Status != "failed" {
+		t.Fatalf("expected failed scan to remain current, got %+v", current)
+	}
+}
+
+func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
+	_, err := normalizeNodeQueryOptions(NodeQueryOptions{Kind: "wat"}, 10, "size_desc")
+	if err == nil {
+		t.Fatalf("expected error for invalid type")
+	}
+
+	_, err = normalizeNodeQueryOptions(NodeQueryOptions{Sort: "wat"}, 10, "size_desc")
+	if err == nil {
+		t.Fatalf("expected error for invalid sort")
+	}
+}
+
 func testConfig(root, dataDir string) config.Config {
 	return config.Config{
 		AnalyzeRoot:          root,
@@ -346,163 +491,6 @@ func waitForScanStatusViaService(t *testing.T, svc *Service, scanID int64) store
 	}
 	t.Fatalf("scan did not complete in time")
 	return store.ScanRun{}
-}
-
-type singleNodeScanner struct {
-	root string
-}
-
-func (s *singleNodeScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
-	if err := cb(scan.NodeRecord{
-		Path:       s.root,
-		ParentPath: "",
-		Name:       filepath.Base(s.root),
-		Kind:       "dir",
-		SizeBytes:  1,
-		MtimeUnix:  time.Now().Unix(),
-	}); err != nil {
-		return scan.Result{}, err
-	}
-	return scan.Result{TotalBytes: 1, TotalNodes: 1}, nil
-}
-
-func TestServicePrunesCompletedHistoryAfterScan(t *testing.T) {
-	root := t.TempDir()
-	dataDir := t.TempDir()
-
-	cfg := testConfig(root, dataDir)
-	cfg.ScanHistoryMaxRuns = 2
-
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	for i := 0; i < 3; i++ {
-		scanID, err := st.CreateScanRun(context.Background(), root)
-		if err != nil {
-			t.Fatalf("create scan run: %v", err)
-		}
-		if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
-			t.Fatalf("mark running: %v", err)
-		}
-		writer, err := st.BeginNodeWriter(context.Background(), scanID)
-		if err != nil {
-			t.Fatalf("begin writer: %v", err)
-		}
-		if err := writer.InsertNode(context.Background(), scanID, store.Node{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: int64(i + 1)}); err != nil {
-			_ = writer.Rollback()
-			t.Fatalf("insert node: %v", err)
-		}
-		if err := writer.Commit(); err != nil {
-			t.Fatalf("commit nodes: %v", err)
-		}
-		if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), int64(i+1), 1, 0, ""); err != nil {
-			t.Fatalf("complete scan: %v", err)
-		}
-	}
-
-	svc := NewService(cfg, st)
-	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
-		return &singleNodeScanner{root: root}
-	})
-
-	scanID, err := svc.StartScan(context.Background())
-	if err != nil {
-		t.Fatalf("start scan: %v", err)
-	}
-
-	run := waitForScanStatus(t, st, scanID)
-	if run.Status != "completed" {
-		t.Fatalf("expected completed, got %s", run.Status)
-	}
-
-	runs, err := svc.ListScans(context.Background(), 10, "completed")
-	if err != nil {
-		t.Fatalf("list scans: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 completed scans after prune, got %d", len(runs))
-	}
-}
-
-func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
-	_, err := normalizeNodeQueryOptions(NodeQueryOptions{Kind: "wat"}, 10, "size_desc")
-	if err == nil {
-		t.Fatalf("expected error for invalid type")
-	}
-
-	_, err = normalizeNodeQueryOptions(NodeQueryOptions{Sort: "wat"}, 10, "size_desc")
-	if err == nil {
-		t.Fatalf("expected error for invalid sort")
-	}
-}
-
-func TestGetDirectoryDiffAllowsPathMissingInTargetScan(t *testing.T) {
-	root := t.TempDir()
-	dataDir := t.TempDir()
-
-	cfg := testConfig(root, dataDir)
-
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	removedPath := filepath.Join(root, "removed")
-	baseID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
-		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 200, MtimeUnix: 1},
-		{Path: removedPath, ParentPath: root, Name: "removed", Kind: "dir", SizeBytes: 120, MtimeUnix: 1},
-		{Path: filepath.Join(removedPath, "child.txt"), ParentPath: removedPath, Name: "child.txt", Kind: "file", SizeBytes: 120, MtimeUnix: 1},
-	})
-	targetID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
-		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 80, MtimeUnix: 1},
-	})
-
-	svc := NewService(cfg, st)
-	resp, err := svc.GetDirectoryDiff(context.Background(), targetID, baseID, removedPath, NodeQueryOptions{})
-	if err != nil {
-		t.Fatalf("get directory diff: %v", err)
-	}
-	if resp.Summary.ChangeClass != "removed" {
-		t.Fatalf("expected removed summary, got %+v", resp.Summary)
-	}
-	if len(resp.Items) != 1 || resp.Items[0].Name != "child.txt" || resp.Items[0].ChangeClass != "removed" {
-		t.Fatalf("unexpected removed path items: %+v", resp.Items)
-	}
-}
-
-func TestGetDirectoryDiffReturnsNotFoundWhenPathMissingInBothScans(t *testing.T) {
-	root := t.TempDir()
-	dataDir := t.TempDir()
-
-	cfg := testConfig(root, dataDir)
-
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	baseID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 100, MtimeUnix: 1}})
-	targetID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 120, MtimeUnix: 1}})
-
-	svc := NewService(cfg, st)
-	_, err = svc.GetDirectoryDiff(context.Background(), targetID, baseID, filepath.Join(root, "missing"), NodeQueryOptions{})
-	if !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("expected store.ErrNotFound, got %v", err)
-	}
 }
 
 func createCompletedScanWithNodesForServiceTest(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {

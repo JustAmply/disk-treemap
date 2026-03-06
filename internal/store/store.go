@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -60,28 +59,6 @@ type NodeQueryOptions struct {
 	Kind    string
 	MinSize int64
 	Sort    string
-}
-
-type DiffQueryOptions struct {
-	Limit   int
-	Query   string
-	Kind    string
-	MinSize int64
-	Sort    string
-}
-
-type DiffItem struct {
-	Path            string  `json:"path"`
-	Name            string  `json:"name"`
-	Kind            string  `json:"type"`
-	BeforeExists    bool    `json:"before_exists"`
-	AfterExists     bool    `json:"after_exists"`
-	BeforeBytes     int64   `json:"before_bytes"`
-	AfterBytes      int64   `json:"after_bytes"`
-	DeltaBytes      int64   `json:"delta_bytes"`
-	DeltaPercent    float64 `json:"delta_percent"`
-	VisualSizeBytes int64   `json:"visual_size_bytes"`
-	ChangeClass     string  `json:"change_class"`
 }
 
 type NodeWriter struct {
@@ -267,12 +244,38 @@ func (s *Store) GetScanRun(ctx context.Context, scanID int64) (ScanRun, error) {
 }
 
 func (s *Store) GetLatestScanRun(ctx context.Context) (*ScanRun, error) {
+	return s.getLatestScanRun(ctx, "")
+}
+
+func (s *Store) GetLatestCompletedScanRun(ctx context.Context) (*ScanRun, error) {
+	return s.getLatestScanRun(ctx, "completed")
+}
+
+func (s *Store) getLatestScanRun(ctx context.Context, status string) (*ScanRun, error) {
+	query := `
+		SELECT id, started_at, finished_at, status, error, root_path, total_bytes, total_nodes, warning_count
+		FROM scan_runs
+	`
+	args := make([]any, 0, 1)
+	if status != "" {
+		query += ` WHERE status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY id DESC LIMIT 1`
+
 	var run ScanRun
 	var startedAt, finishedAt sql.NullString
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, started_at, finished_at, status, error, root_path, total_bytes, total_nodes, warning_count
-		FROM scan_runs ORDER BY id DESC LIMIT 1
-	`).Scan(&run.ID, &startedAt, &finishedAt, &run.Status, &run.Error, &run.RootPath, &run.TotalBytes, &run.TotalNodes, &run.WarningCount)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+		&run.ID,
+		&startedAt,
+		&finishedAt,
+		&run.Status,
+		&run.Error,
+		&run.RootPath,
+		&run.TotalBytes,
+		&run.TotalNodes,
+		&run.WarningCount,
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -283,71 +286,29 @@ func (s *Store) GetLatestScanRun(ctx context.Context) (*ScanRun, error) {
 	return &run, nil
 }
 
-func (s *Store) ListScanRuns(ctx context.Context, limit int, status string) ([]ScanRun, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-
-	baseQuery := `
-		SELECT id, started_at, finished_at, status, error, root_path, total_bytes, total_nodes, warning_count
-		FROM scan_runs
-	`
-
-	args := make([]any, 0, 2)
-	if status != "" {
-		baseQuery += ` WHERE status=?`
-		args = append(args, status)
-	}
-	baseQuery += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, baseQuery, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list scan runs: %w", err)
-	}
-	defer rows.Close()
-
-	runs := make([]ScanRun, 0, limit)
-	for rows.Next() {
-		var run ScanRun
-		var startedAt, finishedAt sql.NullString
-		if err := rows.Scan(&run.ID, &startedAt, &finishedAt, &run.Status, &run.Error, &run.RootPath, &run.TotalBytes, &run.TotalNodes, &run.WarningCount); err != nil {
-			return nil, fmt.Errorf("scan scan_runs row: %w", err)
+func (s *Store) PruneOperationalScans(ctx context.Context) ([]int64, error) {
+	var latestID sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM scan_runs ORDER BY id DESC LIMIT 1`).Scan(&latestID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
 		}
-		attachScanTimestamps(&run, startedAt, finishedAt)
-		runs = append(runs, run)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate scan runs: %w", err)
+		return nil, fmt.Errorf("get latest scan id: %w", err)
 	}
 
-	return runs, nil
-}
-
-func (s *Store) DeleteScanRun(ctx context.Context, scanID int64) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM scan_runs WHERE id=?`, scanID)
-	if err != nil {
-		return false, fmt.Errorf("delete scan run: %w", err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("delete scan run rows affected: %w", err)
-	}
-	return affected > 0, nil
-}
-
-func (s *Store) PruneCompletedFailedScans(ctx context.Context, keepMax int) ([]int64, error) {
-	if keepMax < 1 {
-		return nil, nil
+	var latestCompletedID sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM scan_runs WHERE status='completed' ORDER BY id DESC LIMIT 1`).Scan(&latestCompletedID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get latest completed scan id: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id
-		FROM scan_runs
-		WHERE status IN ('completed','failed')
-		ORDER BY id DESC
-		LIMIT -1 OFFSET ?
-	`, keepMax)
+	keepIDs := map[int64]struct{}{}
+	if latestID.Valid {
+		keepIDs[latestID.Int64] = struct{}{}
+	}
+	if latestCompletedID.Valid {
+		keepIDs[latestCompletedID.Int64] = struct{}{}
+	}
+
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM scan_runs ORDER BY id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("select scan runs to prune: %w", err)
 	}
@@ -359,7 +320,9 @@ func (s *Store) PruneCompletedFailedScans(ctx context.Context, keepMax int) ([]i
 		if err := rows.Scan(&id); err != nil {
 			return nil, fmt.Errorf("scan prune id: %w", err)
 		}
-		ids = append(ids, id)
+		if _, keep := keepIDs[id]; !keep {
+			ids = append(ids, id)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate prune ids: %w", err)
@@ -518,106 +481,6 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 	return items, nil
 }
 
-func (s *Store) ListDirectoryDiff(ctx context.Context, targetScanID, baseScanID int64, parentPath string, limit int) ([]DiffItem, error) {
-	return s.ListDiffChildren(ctx, targetScanID, baseScanID, parentPath, DiffQueryOptions{Limit: limit, Sort: "delta_desc"})
-}
-
-func (s *Store) ListDiffChildren(ctx context.Context, targetScanID, baseScanID int64, parentPath string, opts DiffQueryOptions) ([]DiffItem, error) {
-	if opts.Limit <= 0 {
-		opts.Limit = 100
-	}
-
-	query := strings.Builder{}
-	query.WriteString(`
-		WITH base_items AS (
-			SELECT path, name, kind, size_bytes
-			FROM nodes
-			WHERE scan_id=? AND parent_path=?
-		), target_items AS (
-			SELECT path, name, kind, size_bytes
-			FROM nodes
-			WHERE scan_id=? AND parent_path=?
-		), joined AS (
-			SELECT
-				COALESCE(t.path, b.path) AS path,
-				COALESCE(t.name, b.name) AS name,
-				COALESCE(t.kind, b.kind) AS kind,
-				b.path AS before_path,
-				t.path AS after_path,
-				b.size_bytes AS before_bytes,
-				t.size_bytes AS after_bytes
-			FROM base_items b
-			LEFT JOIN target_items t
-				ON t.name = b.name
-				AND t.kind = b.kind
-			UNION ALL
-			SELECT
-				t.path AS path,
-				t.name AS name,
-				t.kind AS kind,
-				NULL AS before_path,
-				t.path AS after_path,
-				NULL AS before_bytes,
-				t.size_bytes AS after_bytes
-			FROM target_items t
-			LEFT JOIN base_items b
-				ON b.name = t.name
-				AND b.kind = t.kind
-			WHERE b.path IS NULL
-		)
-		SELECT
-			path,
-			name,
-			kind,
-			before_path,
-			after_path,
-			before_bytes,
-			after_bytes
-		FROM joined
-		WHERE (
-			before_path IS NULL
-			OR after_path IS NULL
-			OR COALESCE(before_bytes, 0) <> COALESCE(after_bytes, 0)
-		)
-	`)
-
-	args := []any{baseScanID, parentPath, targetScanID, parentPath}
-	appendDiffFilters(&query, &args, opts)
-
-	query.WriteString(" ORDER BY ")
-	query.WriteString(normalizeDiffSort(opts.Sort))
-	query.WriteString(" LIMIT ?")
-	args = append(args, opts.Limit)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, fmt.Errorf("list diff children: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]DiffItem, 0)
-	for rows.Next() {
-		var (
-			path        string
-			name        string
-			kind        string
-			beforePath  sql.NullString
-			afterPath   sql.NullString
-			beforeBytes sql.NullInt64
-			afterBytes  sql.NullInt64
-		)
-		if err := rows.Scan(&path, &name, &kind, &beforePath, &afterPath, &beforeBytes, &afterBytes); err != nil {
-			return nil, fmt.Errorf("scan diff row: %w", err)
-		}
-		items = append(items, buildDiffItem(path, name, kind, beforePath.Valid, afterPath.Valid, beforeBytes.Int64, afterBytes.Int64))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate diff rows: %w", err)
-	}
-
-	return items, nil
-}
-
 func descendantPrefixes(basePath string) []string {
 	prefixes := make([]string, 0, 2)
 	seen := map[string]struct{}{}
@@ -644,6 +507,7 @@ func descendantPrefixes(basePath string) []string {
 	add(cleanBackward)
 	return prefixes
 }
+
 func appendNodeFilters(query *strings.Builder, args *[]any, opts NodeQueryOptions) {
 	if opts.Kind == "file" || opts.Kind == "dir" {
 		query.WriteString(" AND kind=?")
@@ -655,21 +519,6 @@ func appendNodeFilters(query *strings.Builder, args *[]any, opts NodeQueryOption
 	}
 	if opts.MinSize > 0 {
 		query.WriteString(" AND size_bytes>=?")
-		*args = append(*args, opts.MinSize)
-	}
-}
-
-func appendDiffFilters(query *strings.Builder, args *[]any, opts DiffQueryOptions) {
-	if opts.Kind == "file" || opts.Kind == "dir" {
-		query.WriteString(" AND kind=?")
-		*args = append(*args, opts.Kind)
-	}
-	if opts.Query != "" {
-		query.WriteString(" AND lower(name) LIKE ?")
-		*args = append(*args, "%"+strings.ToLower(opts.Query)+"%")
-	}
-	if opts.MinSize > 0 {
-		query.WriteString(" AND MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0))>=?")
 		*args = append(*args, opts.MinSize)
 	}
 }
@@ -687,76 +536,6 @@ func normalizeSort(sort string) string {
 	default:
 		return "size_bytes DESC, name ASC"
 	}
-}
-
-func normalizeDiffSort(sort string) string {
-	switch sort {
-	case "delta_asc":
-		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) ASC, name ASC"
-	case "size_desc":
-		return "MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0)) DESC, name ASC"
-	case "size_asc":
-		return "MAX(COALESCE(before_bytes, 0), COALESCE(after_bytes, 0)) ASC, name ASC"
-	case "name_asc":
-		return "name ASC, kind ASC"
-	case "name_desc":
-		return "name DESC, kind DESC"
-	case "delta_desc", "":
-		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) DESC, name ASC"
-	default:
-		return "ABS(COALESCE(after_bytes, 0) - COALESCE(before_bytes, 0)) DESC, name ASC"
-	}
-}
-
-func buildDiffItem(path, name, kind string, beforeExists, afterExists bool, beforeBytes, afterBytes int64) DiffItem {
-	item := DiffItem{
-		Path:            path,
-		Name:            name,
-		Kind:            kind,
-		BeforeExists:    beforeExists,
-		AfterExists:     afterExists,
-		BeforeBytes:     beforeBytes,
-		AfterBytes:      afterBytes,
-		DeltaBytes:      afterBytes - beforeBytes,
-		VisualSizeBytes: maxInt64(beforeBytes, afterBytes),
-	}
-
-	switch {
-	case !beforeExists && afterExists:
-		item.ChangeClass = "new"
-	case beforeExists && !afterExists:
-		item.ChangeClass = "removed"
-	case item.DeltaBytes > 0:
-		item.ChangeClass = "grew"
-	case item.DeltaBytes < 0:
-		item.ChangeClass = "shrunk"
-	default:
-		item.ChangeClass = "unchanged"
-	}
-
-	switch {
-	case !beforeExists && afterExists:
-		item.DeltaPercent = 100
-	case beforeBytes == 0 && afterBytes == 0:
-		item.DeltaPercent = 0
-	case beforeBytes == 0:
-		item.DeltaPercent = 100
-	default:
-		item.DeltaPercent = (float64(item.DeltaBytes) * 100.0) / float64(beforeBytes)
-	}
-
-	if math.IsNaN(item.DeltaPercent) || math.IsInf(item.DeltaPercent, 0) {
-		item.DeltaPercent = 0
-	}
-
-	return item
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func attachScanTimestamps(run *ScanRun, startedAt, finishedAt sql.NullString) {

@@ -147,88 +147,48 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	}
 }
 
-func TestPruneCompletedFailedScansKeepsNewestN(t *testing.T) {
+func TestPruneOperationalScansKeepsLatestAndLatestCompleted(t *testing.T) {
 	st := newTestStore(t)
 
-	for i := 0; i < 6; i++ {
-		insertCompletedScan(t, st, "/scanroot", []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: int64(i)}})
+	olderCompleted := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
+	})
+	latestCompleted := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 20},
+	})
+	failedID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create failed run: %v", err)
+	}
+	if err := st.MarkScanRunning(context.Background(), failedID, time.Now().UTC()); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := st.CompleteScan(context.Background(), failedID, "failed", time.Now().UTC(), 0, 0, 1, "boom"); err != nil {
+		t.Fatalf("complete failed run: %v", err)
 	}
 
-	deleted, err := st.PruneCompletedFailedScans(context.Background(), 2)
+	deleted, err := st.PruneOperationalScans(context.Background())
 	if err != nil {
 		t.Fatalf("prune scans: %v", err)
 	}
-	if len(deleted) != 4 {
-		t.Fatalf("expected 4 deleted scans, got %d", len(deleted))
+	if len(deleted) != 1 || deleted[0] != olderCompleted {
+		t.Fatalf("unexpected deleted scans: %v", deleted)
 	}
 
-	runs, err := st.ListScanRuns(context.Background(), 10, "completed")
+	current, err := st.GetLatestScanRun(context.Background())
 	if err != nil {
-		t.Fatalf("list runs: %v", err)
+		t.Fatalf("get latest scan: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 completed runs after prune, got %d", len(runs))
+	if current == nil || current.ID != failedID {
+		t.Fatalf("expected failed run to remain current, got %+v", current)
 	}
-}
 
-func TestDeleteScanRunCascadesNodes(t *testing.T) {
-	st := newTestStore(t)
-	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
-		{Path: "/scanroot/a", ParentPath: "/scanroot", Name: "a", Kind: "file", SizeBytes: 5},
-	})
-
-	deleted, err := st.DeleteScanRun(context.Background(), scanID)
+	completed, err := st.GetLatestCompletedScanRun(context.Background())
 	if err != nil {
-		t.Fatalf("delete scan run: %v", err)
+		t.Fatalf("get latest completed scan: %v", err)
 	}
-	if !deleted {
-		t.Fatalf("expected deleted=true")
-	}
-
-	var count int
-	if err := st.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM nodes WHERE scan_id=?`, scanID).Scan(&count); err != nil {
-		t.Fatalf("count nodes: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("expected 0 nodes after delete, got %d", count)
-	}
-}
-
-func TestListDirectoryDiffIncludesGrowthShrinkNewRemoved(t *testing.T) {
-	st := newTestStore(t)
-
-	baseID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 300},
-		{Path: "/scanroot/a", ParentPath: "/scanroot", Name: "a", Kind: "dir", SizeBytes: 100},
-		{Path: "/scanroot/b", ParentPath: "/scanroot", Name: "b", Kind: "dir", SizeBytes: 200},
-	})
-	targetID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 350},
-		{Path: "/scanroot/a", ParentPath: "/scanroot", Name: "a", Kind: "dir", SizeBytes: 120},
-		{Path: "/scanroot/c", ParentPath: "/scanroot", Name: "c", Kind: "dir", SizeBytes: 230},
-	})
-
-	diffs, err := st.ListDirectoryDiff(context.Background(), targetID, baseID, "/scanroot", 10)
-	if err != nil {
-		t.Fatalf("list directory diff: %v", err)
-	}
-	if len(diffs) != 3 {
-		t.Fatalf("expected 3 diff rows, got %d", len(diffs))
-	}
-
-	seen := map[string]string{}
-	for _, d := range diffs {
-		seen[d.Name] = d.ChangeClass
-	}
-	if seen["a"] != "grew" {
-		t.Fatalf("expected a to grow, got %q", seen["a"])
-	}
-	if seen["b"] != "removed" {
-		t.Fatalf("expected b to be removed, got %q", seen["b"])
-	}
-	if seen["c"] != "new" {
-		t.Fatalf("expected c to be new, got %q", seen["c"])
+	if completed == nil || completed.ID != latestCompleted {
+		t.Fatalf("expected latest completed run to remain, got %+v", completed)
 	}
 }
 
@@ -256,24 +216,26 @@ func TestListLargestInPathWithOptionsSupportsSort(t *testing.T) {
 	}
 }
 
-func BenchmarkListDirectoryDiff(b *testing.B) {
+func BenchmarkListLargestInPath(b *testing.B) {
 	st := newTestStoreForBenchmark(b)
 
-	baseNodes := []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 0}}
-	targetNodes := []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 0}}
+	nodes := []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 0}}
 	for i := 0; i < 500; i++ {
-		name := fmt.Sprintf("dir-%d", i)
-		baseNodes = append(baseNodes, Node{Path: "/scanroot/" + name, ParentPath: "/scanroot", Name: name, Kind: "dir", SizeBytes: int64(i)})
-		targetNodes = append(targetNodes, Node{Path: "/scanroot/" + name, ParentPath: "/scanroot", Name: name, Kind: "dir", SizeBytes: int64(i + 25)})
+		nodes = append(nodes, Node{
+			Path:       fmt.Sprintf("/scanroot/file-%d.bin", i),
+			ParentPath: "/scanroot",
+			Name:       fmt.Sprintf("file-%d.bin", i),
+			Kind:       "file",
+			SizeBytes:  int64(i + 1),
+		})
 	}
 
-	baseID := insertCompletedScanBenchmark(b, st, "/scanroot", baseNodes)
-	targetID := insertCompletedScanBenchmark(b, st, "/scanroot", targetNodes)
+	scanID := insertCompletedScanBenchmark(b, st, "/scanroot", nodes)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := st.ListDirectoryDiff(context.Background(), targetID, baseID, "/scanroot", 200); err != nil {
-			b.Fatalf("list diff: %v", err)
+		if _, err := st.ListLargestInPath(context.Background(), scanID, "/scanroot", 200); err != nil {
+			b.Fatalf("list largest: %v", err)
 		}
 	}
 }
@@ -372,86 +334,5 @@ func insertCompletedScanBenchmark(b *testing.B, st *Store, root string, nodes []
 func TestNormalizeSortDefaultsToSizeDesc(t *testing.T) {
 	if got := normalizeSort("invalid"); !strings.Contains(got, "size_bytes DESC") {
 		t.Fatalf("expected fallback sort, got %q", got)
-	}
-}
-
-func TestListDiffChildrenIncludesFilesDirsAndOmitsUnchanged(t *testing.T) {
-	st := newTestStore(t)
-
-	baseID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 220},
-		{Path: "/scanroot/docs", ParentPath: "/scanroot", Name: "docs", Kind: "dir", SizeBytes: 100},
-		{Path: "/scanroot/stable", ParentPath: "/scanroot", Name: "stable", Kind: "dir", SizeBytes: 10},
-		{Path: "/scanroot/old.log", ParentPath: "/scanroot", Name: "old.log", Kind: "file", SizeBytes: 40},
-		{Path: "/scanroot/report.txt", ParentPath: "/scanroot", Name: "report.txt", Kind: "file", SizeBytes: 20},
-	})
-	targetID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 365},
-		{Path: "/scanroot/docs", ParentPath: "/scanroot", Name: "docs", Kind: "dir", SizeBytes: 160},
-		{Path: "/scanroot/stable", ParentPath: "/scanroot", Name: "stable", Kind: "dir", SizeBytes: 10},
-		{Path: "/scanroot/new.txt", ParentPath: "/scanroot", Name: "new.txt", Kind: "file", SizeBytes: 95},
-		{Path: "/scanroot/report.txt", ParentPath: "/scanroot", Name: "report.txt", Kind: "file", SizeBytes: 25},
-	})
-
-	items, err := st.ListDiffChildren(context.Background(), targetID, baseID, "/scanroot", DiffQueryOptions{Limit: 10, Sort: "delta_desc"})
-	if err != nil {
-		t.Fatalf("list diff children: %v", err)
-	}
-	if len(items) != 4 {
-		t.Fatalf("expected 4 diff rows, got %d", len(items))
-	}
-
-	seen := map[string]DiffItem{}
-	for _, item := range items {
-		seen[item.Name+"|"+item.Kind] = item
-	}
-
-	docs := seen["docs|dir"]
-	if docs.ChangeClass != "grew" || docs.DeltaBytes != 60 || docs.VisualSizeBytes != 160 {
-		t.Fatalf("unexpected docs diff: %+v", docs)
-	}
-	oldLog := seen["old.log|file"]
-	if oldLog.ChangeClass != "removed" || oldLog.BeforeExists != true || oldLog.AfterExists != false {
-		t.Fatalf("unexpected removed file diff: %+v", oldLog)
-	}
-	newTxt := seen["new.txt|file"]
-	if newTxt.ChangeClass != "new" || newTxt.VisualSizeBytes != 95 {
-		t.Fatalf("unexpected new file diff: %+v", newTxt)
-	}
-	if _, ok := seen["stable|dir"]; ok {
-		t.Fatalf("unchanged item should be omitted: %+v", seen["stable|dir"])
-	}
-}
-
-func TestListDiffChildrenSupportsFiltersAndSizeSort(t *testing.T) {
-	st := newTestStore(t)
-
-	baseID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 150},
-		{Path: "/scanroot/a.txt", ParentPath: "/scanroot", Name: "a.txt", Kind: "file", SizeBytes: 5},
-		{Path: "/scanroot/logs", ParentPath: "/scanroot", Name: "logs", Kind: "dir", SizeBytes: 30},
-	})
-	targetID := insertCompletedScan(t, st, "/scanroot", []Node{
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 280},
-		{Path: "/scanroot/a.txt", ParentPath: "/scanroot", Name: "a.txt", Kind: "file", SizeBytes: 80},
-		{Path: "/scanroot/archive.txt", ParentPath: "/scanroot", Name: "archive.txt", Kind: "file", SizeBytes: 60},
-		{Path: "/scanroot/logs", ParentPath: "/scanroot", Name: "logs", Kind: "dir", SizeBytes: 90},
-	})
-
-	items, err := st.ListDiffChildren(context.Background(), targetID, baseID, "/scanroot", DiffQueryOptions{
-		Limit:   10,
-		Kind:    "file",
-		Query:   ".txt",
-		MinSize: 50,
-		Sort:    "size_desc",
-	})
-	if err != nil {
-		t.Fatalf("list filtered diff children: %v", err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 filtered diff rows, got %d", len(items))
-	}
-	if items[0].Name != "a.txt" || items[1].Name != "archive.txt" {
-		t.Fatalf("unexpected filtered order: %+v", items)
 	}
 }
