@@ -92,6 +92,10 @@
     syncFilterInputs();
     renderAll();
 
+    if (App.isScanActive(state.currentScan)) {
+      startPolling(state.currentScan.id);
+    }
+
     const desiredScanId = chooseInitialViewScanId();
     if (!desiredScanId) {
       return;
@@ -415,6 +419,9 @@
       state.currentView = null;
       renderAll();
       syncUrlState();
+      if (App.isScanActive(selected)) {
+        startPolling(selected.id);
+      }
     } catch (err) {
       if (!fallbackOnMissing) {
         throw err;
