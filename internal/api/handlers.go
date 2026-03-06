@@ -322,6 +322,11 @@ func (h *Handler) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/history" || r.URL.Path == "/history/" {
+		http.ServeFile(w, r, filepath.Join(h.staticRoot, "history.html"))
+		return
+	}
+
 	h.staticFS.ServeHTTP(w, r)
 }
 

@@ -7,14 +7,24 @@
   <link rel="stylesheet" href="/app.css" />
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/explore.js" defer></script>
 </head>
 <body>
-  <div class="app-shell">
+  <div class="app-shell app-shell--explore">
     <header class="app-header">
       <div class="app-heading">
         <p class="eyebrow">Disk usage explorer</p>
-        <h1>Disk Treemap</h1>
-        <p id="rootPath" class="root-path">Loading root...</p>
+        <div class="title-row">
+          <div>
+            <h1>Disk Treemap</h1>
+            <p id="rootPath" class="root-path">Loading root...</p>
+          </div>
+
+          <nav class="page-nav" aria-label="Primary">
+            <a class="page-nav-link is-active" href="/">Explore</a>
+            <a class="page-nav-link" href="/history">History</a>
+          </nav>
+        </div>
       </div>
 
       <div class="header-actions">
@@ -56,18 +66,12 @@
       <div class="toolbar-header">
         <div>
           <p class="panel-kicker">View options</p>
-          <h2>Compare and filter</h2>
+          <h2>Filter current view</h2>
         </div>
+        <button id="clearFiltersButton" class="ghost-button" type="button" hidden>Clear filters</button>
       </div>
 
-      <div class="toolbar-grid">
-        <label class="field">
-          <span class="field-label">Compare to scan</span>
-          <select id="compareBaseSelect">
-            <option value="">None</option>
-          </select>
-        </label>
-
+      <div class="toolbar-grid toolbar-grid--explore">
         <label class="field">
           <span class="field-label">Search</span>
           <input id="searchInput" type="text" placeholder="Name contains..." />
@@ -91,15 +95,6 @@
           <span class="field-label">Sort</span>
           <select id="sortSelect"></select>
         </label>
-
-        <div class="field field-actions">
-          <span class="field-label">Actions</span>
-          <div class="toolbar-actions">
-            <button id="applyFiltersButton" class="secondary-button" type="button">Apply</button>
-            <button id="resetFiltersButton" class="ghost-button" type="button">Reset</button>
-            <button id="clearCompareButton" class="ghost-button" type="button">Clear Compare</button>
-          </div>
-        </div>
       </div>
     </section>
 
@@ -109,7 +104,6 @@
           <div>
             <p class="panel-kicker">Visualization</p>
             <h2>Treemap</h2>
-            <p id="compareMeta" class="panel-note" hidden></p>
           </div>
 
           <div class="legend" aria-label="Legend">
@@ -121,15 +115,7 @@
               <span class="legend-swatch legend-swatch-file"></span>
               Files
             </span>
-            <span class="legend-item">
-              <span class="legend-swatch legend-swatch-compare"></span>
-              Diff emphasis
-            </span>
           </div>
-        </div>
-
-        <div id="compareSummary" class="compare-summary" hidden>
-          <div id="comparePathState" class="compare-path-state"></div>
         </div>
 
         <div id="chartFrame" class="chart-frame" data-view="empty">
@@ -137,7 +123,7 @@
             <p class="empty-eyebrow">Start here</p>
             <h3 id="emptyStateTitle">Run a scan to map this folder</h3>
             <p id="emptyStateBody" class="empty-body">
-              Scan the configured root path to build a treemap, scan history, and compare view.
+              Scan the configured root path to build a treemap and inspect the current scan in context.
             </p>
             <button id="emptyScanButton" class="scan-button" type="button">Run Scan</button>
           </div>
@@ -159,20 +145,7 @@
 
           <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
 
-          <section class="inspector-section">
-            <div class="section-heading section-heading-inline">
-              <div>
-                <h3>Scan history</h3>
-                <p id="historySummary" class="section-note">No scans loaded yet.</p>
-              </div>
-              <button id="refreshHistoryButton" class="ghost-button" type="button">Refresh</button>
-            </div>
-
-            <div id="historyList" class="history-list" aria-live="polite"></div>
-            <p id="historyEmpty" class="list-empty" hidden>No scans available.</p>
-          </section>
-
-          <section class="inspector-section">
+          <section class="inspector-section detail-section">
             <div class="section-heading">
               <h3 id="detailTitle">Largest items</h3>
               <p id="detailSummary" class="section-note">No scan data yet.</p>
