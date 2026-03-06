@@ -1,20 +1,10 @@
 window.DiskTreemapApp = (() => {
-  const sortOptions = {
-    normal: [
-      { value: "size_desc", label: "Size desc" },
-      { value: "size_asc", label: "Size asc" },
-      { value: "name_asc", label: "Name asc" },
-      { value: "name_desc", label: "Name desc" },
-    ],
-    compare: [
-      { value: "delta_desc", label: "Delta desc" },
-      { value: "delta_asc", label: "Delta asc" },
-      { value: "size_desc", label: "Size desc" },
-      { value: "size_asc", label: "Size asc" },
-      { value: "name_asc", label: "Name asc" },
-      { value: "name_desc", label: "Name desc" },
-    ],
-  };
+  const sortOptions = [
+    { value: "size_desc", label: "Size desc" },
+    { value: "size_asc", label: "Size asc" },
+    { value: "name_asc", label: "Name asc" },
+    { value: "name_desc", label: "Name desc" },
+  ];
 
   function clearChildren(element) {
     element.innerHTML = "";
@@ -68,27 +58,6 @@ window.DiskTreemapApp = (() => {
     return `${seconds}s`;
   }
 
-  function formatScanDuration(scan) {
-    if (!scan?.started_at) {
-      return "-";
-    }
-
-    const started = new Date(scan.started_at).getTime();
-    const finished = scan.finished_at ? new Date(scan.finished_at).getTime() : Date.now();
-    if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) {
-      return "-";
-    }
-
-    const seconds = Math.floor((finished - started) / 1000);
-    if (seconds < 60) {
-      return `${seconds}s`;
-    }
-
-    const minutes = Math.floor(seconds / 60);
-    const rem = seconds % 60;
-    return `${minutes}m ${rem}s`;
-  }
-
   function formatBytes(bytes) {
     const value = Number(bytes || 0);
     if (value < 1024) {
@@ -105,29 +74,11 @@ window.DiskTreemapApp = (() => {
     return `${size.toFixed(size >= 10 || unit === 0 ? 1 : 2)} ${units[unit]}`;
   }
 
-  function formatSignedBytes(bytes) {
-    if (bytes === 0) {
-      return "0 B";
-    }
-    const prefix = bytes > 0 ? "+" : "-";
-    return `${prefix}${formatBytes(Math.abs(bytes))}`;
-  }
-
-  function formatOptionalBytes(exists, bytes) {
-    return exists ? formatBytes(bytes || 0) : "-";
-  }
-
   function formatPercent(part, total) {
     if (!total) {
       return "0.00%";
     }
     return `${((part / total) * 100).toFixed(2)}%`;
-  }
-
-  function formatPercentSigned(value) {
-    const numeric = Number(value || 0);
-    const prefix = numeric > 0 ? "+" : "";
-    return `${prefix}${numeric.toFixed(2)}%`;
   }
 
   function escapeHtml(value) {
@@ -137,20 +88,6 @@ window.DiskTreemapApp = (() => {
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&#39;");
-  }
-
-  function compareColorClass(changeClass) {
-    switch (changeClass) {
-      case "new":
-        return "new";
-      case "removed":
-        return "removed";
-      case "shrunk":
-        return "shrunk";
-      case "grew":
-      default:
-        return "grew";
-    }
   }
 
   function isScanActive(scan) {
@@ -203,13 +140,6 @@ window.DiskTreemapApp = (() => {
       return scan.error ? `Failed: ${scan.error}` : "Failed";
     }
     return scan.status || "Unknown";
-  }
-
-  function buildArchiveMeta(scan) {
-    const finished = scan.finished_at ? new Date(scan.finished_at).toLocaleString() : "in progress";
-    const warnings = Number(scan.warning_count || 0);
-    const warningText = warnings > 0 ? `${warnings} warnings` : "No warnings";
-    return `Finished ${finished} | ${formatScanDuration(scan)} | ${warningText}`;
   }
 
   function buildBreadcrumb(root, current) {
@@ -283,18 +213,6 @@ window.DiskTreemapApp = (() => {
     window.history.replaceState({}, "", buildUrl(pathname, params));
   }
 
-  function buildExploreHref(scanId, path, filters = {}) {
-    const params = {
-      scan: scanId || null,
-      path: path || null,
-      q: filters.q || null,
-      type: filters.type || null,
-      min_size: filters.minSize > 0 ? filters.minSize : null,
-      sort: filters.sort || null,
-    };
-    return buildUrl("/", params);
-  }
-
   function readExploreUrlState() {
     const params = new URLSearchParams(window.location.search);
     return {
@@ -304,15 +222,6 @@ window.DiskTreemapApp = (() => {
       type: (params.get("type") || "").trim(),
       minSize: Math.max(0, parsePositiveInt(params.get("min_size")) || 0),
       sort: (params.get("sort") || "").trim(),
-    };
-  }
-
-  function readHistoryUrlState() {
-    const params = new URLSearchParams(window.location.search);
-    return {
-      baseScanId: parsePositiveInt(params.get("base_scan")),
-      targetScanId: parsePositiveInt(params.get("target_scan")),
-      path: params.get("path") || null,
     };
   }
 
@@ -352,10 +261,6 @@ window.DiskTreemapApp = (() => {
     return apiRequest(url, { method: "POST" });
   }
 
-  async function apiDelete(url) {
-    return apiRequest(url, { method: "DELETE" });
-  }
-
   function renderLargestItems(container, items, onNavigate) {
     clearChildren(container);
     items.forEach((item) => {
@@ -391,56 +296,6 @@ window.DiskTreemapApp = (() => {
 
       main.append(nameEl, subtext);
       row.append(main, type, size);
-      container.appendChild(row);
-    });
-  }
-
-  function renderCompareItems(container, items, onNavigate) {
-    clearChildren(container);
-    items.forEach((item) => {
-      const row = document.createElement("div");
-      row.className = "item-row";
-
-      const main = document.createElement("div");
-      main.className = "item-main";
-
-      const nameEl = document.createElement(item.type === "dir" ? "button" : "span");
-      nameEl.className = item.type === "dir" ? "item-link" : "item-name";
-      nameEl.textContent = item.name;
-      nameEl.title = item.path;
-
-      if (item.type === "dir") {
-        nameEl.type = "button";
-        nameEl.addEventListener("click", () => onNavigate(item.path, item.name));
-      }
-
-      const subtext = document.createElement("div");
-      subtext.className = "item-subtext";
-      subtext.textContent = shortPath(item.path);
-      subtext.title = item.path;
-
-      const submeta = document.createElement("div");
-      submeta.className = "item-submeta";
-      submeta.textContent = `Before: ${formatOptionalBytes(item.before_exists, item.before_bytes)} | After: ${formatOptionalBytes(item.after_exists, item.after_bytes)}`;
-
-      const pill = document.createElement("span");
-      pill.className = `change-pill ${item.change_class}`;
-      pill.textContent = item.change_class;
-
-      const valueStack = document.createElement("div");
-      valueStack.className = "item-value-stack";
-
-      const delta = document.createElement("div");
-      delta.className = "item-size";
-      delta.textContent = formatSignedBytes(item.delta_bytes);
-
-      const percent = document.createElement("div");
-      percent.className = "item-secondary-value";
-      percent.textContent = formatPercentSigned(item.delta_percent);
-
-      valueStack.append(delta, percent);
-      main.append(nameEl, subtext, submeta);
-      row.append(main, pill, valueStack);
       container.appendChild(row);
     });
   }
@@ -559,32 +414,21 @@ window.DiskTreemapApp = (() => {
     sortOptions,
     apiGet,
     apiPost,
-    apiDelete,
-    buildArchiveMeta,
-    buildBreadcrumb,
-    buildExploreHref,
-    buildScanSummaryText,
-    buildUrl,
     basename,
+    buildBreadcrumb,
+    buildScanSummaryText,
     clearChildren,
-    compareColorClass,
     debounce,
     escapeHtml,
     formatBytes,
     formatElapsed,
-    formatOptionalBytes,
     formatPercent,
-    formatPercentSigned,
-    formatScanDuration,
-    formatSignedBytes,
     getStatusChip,
     isScanActive,
     logScanWarnings,
     parsePositiveInt,
     readExploreUrlState,
-    readHistoryUrlState,
     renderBreadcrumb,
-    renderCompareItems,
     renderLargestItems,
     renderStatusChip,
     renderTreemap,

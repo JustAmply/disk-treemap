@@ -34,6 +34,11 @@ func main() {
 	if err := st.Init(context.Background()); err != nil {
 		log.Fatalf("init store: %v", err)
 	}
+	if deleted, err := st.PruneOperationalScans(context.Background()); err != nil {
+		log.Fatalf("prune operational scans: %v", err)
+	} else if len(deleted) > 0 {
+		log.Printf("pruned %d old scan run(s) on startup", len(deleted))
+	}
 
 	svc := app.NewService(cfg, st)
 	handler := api.NewHandler(svc, cfg, "web")
