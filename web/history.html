@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Disk Treemap History</title>
+  <link rel="stylesheet" href="/app.css" />
+  <script src="/app.js" defer></script>
+  <script src="/history.js" defer></script>
+</head>
+<body>
+  <div class="app-shell app-shell--history">
+    <header class="app-header">
+      <div class="app-heading">
+        <p class="eyebrow">Disk usage archive</p>
+        <div class="title-row">
+          <div>
+            <h1>Scan History</h1>
+            <p id="rootPath" class="root-path">Loading root...</p>
+          </div>
+
+          <nav class="page-nav" aria-label="Primary">
+            <a class="page-nav-link" href="/">Explore</a>
+            <a class="page-nav-link is-active" href="/history">History</a>
+          </nav>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <span id="scanState" class="status-chip" data-state="idle">Idle</span>
+      </div>
+    </header>
+
+    <section id="scanBanner" class="scan-banner" hidden aria-live="polite">
+      <div id="scanBannerSummary" class="scan-banner-summary"></div>
+      <div id="scanBannerDetails" class="scan-banner-details"></div>
+    </section>
+
+    <section id="appAlert" class="app-alert" hidden aria-live="polite">
+      <div id="appAlertText" class="app-alert-text"></div>
+      <button id="alertRetryButton" class="alert-button" type="button" hidden>Run Scan Again</button>
+    </section>
+
+    <section class="summary-strip summary-strip--history" aria-label="History summary">
+      <div class="summary-card">
+        <span class="summary-label">Latest completed</span>
+        <span id="summaryLatest" class="summary-value">No completed scans</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Saved scans</span>
+        <span id="summarySaved" class="summary-value">0</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Active status</span>
+        <span id="summaryActive" class="summary-value">No scan running</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Compare</span>
+        <span id="summaryCompare" class="summary-value">Closed</span>
+      </div>
+    </section>
+
+    <section class="surface history-hero">
+      <div class="history-hero-copy">
+        <p class="panel-kicker">Archive</p>
+        <h2>Browse saved scans and compare changes away from the treemap.</h2>
+        <p class="section-note">Use Explore for one scan at a time. Use this page for archive browsing and comparisons.</p>
+      </div>
+
+      <div class="history-hero-actions">
+        <button id="openLatestButton" class="scan-button" type="button">Open latest scan</button>
+        <button id="runScanButton" class="secondary-button" type="button">Run new scan</button>
+        <button id="toggleCompareButton" class="ghost-button" type="button" aria-expanded="false" aria-controls="compareSection">
+          Compare scans
+        </button>
+      </div>
+    </section>
+
+    <section id="compareSection" class="surface compare-workbench" hidden>
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Comparison</p>
+          <h2>Compare two completed scans</h2>
+          <p id="compareIntro" class="section-note">Pick a base scan and a target scan to inspect what changed.</p>
+        </div>
+      </div>
+
+      <div class="compare-selectors">
+        <label class="field">
+          <span class="field-label">Base scan</span>
+          <select id="baseScanSelect">
+            <option value="">Select base scan</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">Target scan</span>
+          <select id="targetScanSelect">
+            <option value="">Select target scan</option>
+          </select>
+        </label>
+      </div>
+
+      <nav id="compareBreadcrumb" class="breadcrumb compare-breadcrumb" aria-label="Compare path"></nav>
+
+      <section id="compareSummaryStrip" class="summary-strip compare-summary-strip" hidden aria-label="Compare summary">
+        <div class="summary-card">
+          <span class="summary-label">Before</span>
+          <span id="compareBefore" class="summary-value">-</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">After</span>
+          <span id="compareAfter" class="summary-value">-</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Delta</span>
+          <span id="compareDelta" class="summary-value">-</span>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Changed items</span>
+          <span id="compareChanged" class="summary-value">-</span>
+        </div>
+      </section>
+
+      <p id="compareEmpty" class="list-empty compare-empty">Select two completed scans to compare.</p>
+      <div id="compareList" class="compare-list" hidden aria-live="polite"></div>
+    </section>
+
+    <section class="surface archive-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-kicker">Saved scans</p>
+          <h2>Archive</h2>
+          <p id="historySummary" class="section-note">No scans loaded yet.</p>
+        </div>
+        <button id="refreshHistoryButton" class="ghost-button" type="button">Refresh</button>
+      </div>
+
+      <div id="historyList" class="archive-list" aria-live="polite"></div>
+      <p id="historyEmpty" class="list-empty" hidden>No scans available.</p>
+    </section>
+  </div>
+</body>
+</html>

@@ -7,107 +7,157 @@
   <link rel="stylesheet" href="/app.css" />
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/explore.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <h1>Disk Treemap</h1>
-      <p id="rootPath">Root: loading...</p>
-      <div id="scanLive" class="scan-live" hidden aria-live="polite">
-        <div id="scanLiveSummary" class="scan-live-summary"></div>
-        <div id="scanLiveDetails" class="scan-live-details"></div>
-      </div>
-    </div>
-    <div class="actions">
-      <button id="scanButton" type="button">Run Scan</button>
-      <span id="scanState" class="state">Idle</span>
-    </div>
-  </header>
+  <div class="app-shell app-shell--explore">
+    <header class="app-header">
+      <div class="app-heading">
+        <p class="eyebrow">Disk usage explorer</p>
+        <div class="title-row">
+          <div>
+            <h1>Disk Treemap</h1>
+            <p id="rootPath" class="root-path">Loading root...</p>
+          </div>
 
-  <main class="layout">
-    <section class="panel controls-panel">
-      <div class="controls-row">
-        <label>
-          Compare to scan
-          <select id="compareBaseSelect">
-            <option value="">None</option>
-          </select>
-        </label>
-        <button id="clearCompareButton" type="button" class="secondary">Clear Compare</button>
+          <nav class="page-nav" aria-label="Primary">
+            <a class="page-nav-link is-active" href="/">Explore</a>
+            <a class="page-nav-link" href="/history">History</a>
+          </nav>
+        </div>
       </div>
-      <div class="controls-row filters">
-        <label>
-          Search
-          <input id="searchInput" type="text" placeholder="name contains..." />
+
+      <div class="header-actions">
+        <span id="scanState" class="status-chip" data-state="idle">Idle</span>
+        <button id="scanButton" class="scan-button" type="button">Run Scan</button>
+      </div>
+    </header>
+
+    <section id="scanBanner" class="scan-banner" hidden aria-live="polite">
+      <div id="scanBannerSummary" class="scan-banner-summary"></div>
+      <div id="scanBannerDetails" class="scan-banner-details"></div>
+    </section>
+
+    <section class="summary-strip" aria-label="Current view summary">
+      <div class="summary-card">
+        <span class="summary-label">Current folder</span>
+        <span id="summaryPath" class="summary-value summary-path">Not scanned yet</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">In view</span>
+        <span id="summarySize" class="summary-value">-</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Items</span>
+        <span id="summaryItems" class="summary-value">-</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">Last scan</span>
+        <span id="summaryScan" class="summary-value">No scan yet</span>
+      </div>
+    </section>
+
+    <section id="appAlert" class="app-alert" hidden aria-live="polite">
+      <div id="appAlertText" class="app-alert-text"></div>
+      <button id="alertRetryButton" class="alert-button" type="button" hidden>Run Scan Again</button>
+    </section>
+
+    <section class="surface toolbar">
+      <div class="toolbar-header">
+        <div>
+          <p class="panel-kicker">View options</p>
+          <h2>Filter current view</h2>
+        </div>
+        <button id="clearFiltersButton" class="ghost-button" type="button" hidden>Clear filters</button>
+      </div>
+
+      <div class="toolbar-grid toolbar-grid--explore">
+        <label class="field">
+          <span class="field-label">Search</span>
+          <input id="searchInput" type="text" placeholder="Name contains..." />
         </label>
-        <label>
-          Type
+
+        <label class="field">
+          <span class="field-label">Type</span>
           <select id="typeFilter">
             <option value="">All</option>
             <option value="dir">Dirs</option>
             <option value="file">Files</option>
           </select>
         </label>
-        <label>
-          Min bytes
+
+        <label class="field">
+          <span class="field-label">Min bytes</span>
           <input id="minSizeInput" type="number" min="0" step="1" value="0" />
         </label>
-        <label>
-          Sort
+
+        <label class="field">
+          <span class="field-label">Sort</span>
           <select id="sortSelect"></select>
         </label>
-        <button id="applyFiltersButton" type="button">Apply</button>
-        <button id="resetFiltersButton" type="button" class="secondary">Reset</button>
       </div>
     </section>
 
-    <section class="panel chart-panel">
-      <div class="panel-head">
-        <div>
-          <h2>Treemap</h2>
-          <p id="compareMeta" class="hint" hidden></p>
-        </div>
-        <div id="breadcrumb" class="breadcrumb"></div>
-      </div>
-      <div id="compareSummary" class="compare-summary" hidden>
-        <div id="comparePathState" class="compare-path-state"></div>
-      </div>
-      <div id="chart"></div>
-      <p id="chartHint" class="hint">Run a scan to view file sizes.</p>
-    </section>
+    <main class="workspace">
+      <section class="surface main-panel">
+        <div class="panel-header">
+          <div>
+            <p class="panel-kicker">Visualization</p>
+            <h2>Treemap</h2>
+          </div>
 
-    <aside class="panel side-panel">
-      <section>
-        <div class="panel-head">
-          <h2>Scan History</h2>
-          <button id="refreshHistoryButton" type="button" class="secondary">Refresh</button>
+          <div class="legend" aria-label="Legend">
+            <span class="legend-item">
+              <span class="legend-swatch legend-swatch-dir"></span>
+              Folders
+            </span>
+            <span class="legend-item">
+              <span class="legend-swatch legend-swatch-file"></span>
+              Files
+            </span>
+          </div>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Status</th>
-              <th>Total</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="historyTable"></tbody>
-        </table>
+
+        <div id="chartFrame" class="chart-frame" data-view="empty">
+          <div id="chartEmpty" class="empty-state">
+            <p class="empty-eyebrow">Start here</p>
+            <h3 id="emptyStateTitle">Run a scan to map this folder</h3>
+            <p id="emptyStateBody" class="empty-body">
+              Scan the configured root path to build a treemap and inspect the current scan in context.
+            </p>
+            <button id="emptyScanButton" class="scan-button" type="button">Run Scan</button>
+          </div>
+
+          <div id="chartMessage" class="chart-message" hidden></div>
+          <div id="chart" class="chart-canvas" aria-label="Treemap chart"></div>
+        </div>
       </section>
 
-      <section>
-        <h2 id="detailTitle">Largest Items</h2>
-        <p id="scanMeta" class="hint">No scan data yet.</p>
-        <table>
-          <thead>
-            <tr id="detailHead"></tr>
-          </thead>
-          <tbody id="detailBody"></tbody>
-        </table>
-        <p id="detailEmpty" class="hint" hidden></p>
-      </section>
-    </aside>
-  </main>
+      <aside class="surface inspector">
+        <div class="inspector-inner">
+          <div class="panel-header inspector-header">
+            <div>
+              <p class="panel-kicker">Explore</p>
+              <h2>Inspector</h2>
+            </div>
+            <p id="inspectorMeta" class="inspector-meta">Largest items in the current view.</p>
+          </div>
+
+          <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
+
+          <section class="inspector-section detail-section">
+            <div class="section-heading">
+              <h3 id="detailTitle">Largest items</h3>
+              <p id="detailSummary" class="section-note">No scan data yet.</p>
+            </div>
+
+            <div id="detailList" class="item-list" aria-live="polite"></div>
+            <p id="detailEmpty" class="list-empty">Run a scan to inspect folders and files.</p>
+          </section>
+        </div>
+      </aside>
+    </main>
+  </div>
 
   <div id="tooltip" class="tooltip" hidden></div>
 </body>
