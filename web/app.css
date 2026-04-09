@@ -1,4 +1,6 @@
 :root {
+  --page-gutter: clamp(12px, 1.8vw, 28px);
+  --panel-pad: clamp(1rem, 1.3vw, 1.7rem);
   --bg: #edf0ea;
   --surface: rgba(255, 255, 255, 0.9);
   --surface-strong: #ffffff;
@@ -94,9 +96,9 @@ h3 {
 }
 
 .app-shell {
-  width: min(1440px, calc(100vw - 32px));
+  width: min(2200px, calc(100vw - (var(--page-gutter) * 2)));
   margin: 0 auto;
-  padding: var(--space-6) 0 var(--space-7);
+  padding: clamp(14px, 2vw, 30px) 0 clamp(18px, 2.8vw, 40px);
 }
 
 .eyebrow,
@@ -314,8 +316,8 @@ h3 {
 
 .summary-strip {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(clamp(150px, 16vw, 220px), 1fr));
+  gap: clamp(0.7rem, 1vw, 1rem);
   margin-top: var(--space-4);
 }
 
@@ -324,7 +326,7 @@ h3 {
   flex-direction: column;
   gap: 0.42rem;
   min-width: 0;
-  padding: var(--space-3) var(--space-4);
+  padding: clamp(0.8rem, 1vw, 1rem) clamp(0.9rem, 1.2vw, 1.2rem);
   border-radius: var(--radius-md);
 }
 
@@ -345,7 +347,7 @@ h3 {
 
 .toolbar {
   margin-top: var(--space-4);
-  padding: var(--space-5);
+  padding: var(--panel-pad);
   border-radius: var(--radius-lg);
 }
 
@@ -359,8 +361,8 @@ h3 {
 
 .toolbar-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(clamp(180px, 18vw, 260px), 1fr));
+  gap: clamp(0.75rem, 1vw, 1rem);
 }
 
 .field {
@@ -393,10 +395,11 @@ h3 {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(360px, 0.95fr);
-  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1.75fr) minmax(clamp(360px, 28vw, 560px), 1fr);
+  gap: clamp(0.85rem, 1.2vw, 1.4rem);
   margin-top: var(--space-4);
-  align-items: start;
+  align-items: stretch;
+  min-height: clamp(720px, calc(100dvh - 250px), 1320px);
 }
 
 .surface {
@@ -405,7 +408,13 @@ h3 {
 
 .main-panel,
 .inspector-inner {
-  padding: var(--space-5);
+  padding: var(--panel-pad);
+}
+
+.main-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
 }
 
 .panel-header {
@@ -429,7 +438,7 @@ h3 {
 
 .panel-note {
   margin-top: 0.35rem;
-  max-width: 48ch;
+  max-width: 60ch;
 }
 
 .panel-actions {
@@ -471,7 +480,8 @@ h3 {
 
 .chart-frame {
   position: relative;
-  min-height: clamp(420px, 66vh, 780px);
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: calc(var(--radius-lg) - 0.35rem);
@@ -512,9 +522,9 @@ h3 {
 
 .inspector {
   position: sticky;
-  top: 1rem;
-  height: calc(100vh - 2rem);
-  max-height: calc(100vh - 2rem);
+  top: var(--page-gutter);
+  height: calc(100dvh - (var(--page-gutter) * 2));
+  max-height: calc(100dvh - (var(--page-gutter) * 2));
 }
 
 .inspector-inner {
@@ -874,16 +884,13 @@ h3 {
 }
 
 @media (max-width: 1260px) {
-  .summary-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .app-shell {
+    width: min(100vw - (var(--page-gutter) * 2), 100%);
+    padding-top: var(--space-5);
   }
 }
 
 @media (max-width: 1180px) {
-  .app-shell {
-    width: min(100vw - 24px, 1180px);
-    padding-top: var(--space-5);
-  }
 
   .toolbar-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -891,6 +898,7 @@ h3 {
 
   .workspace {
     grid-template-columns: minmax(0, 1fr);
+    min-height: auto;
   }
 
   .inspector {
@@ -967,7 +975,7 @@ h3 {
 
 @media (max-width: 640px) {
   .app-shell {
-    width: min(100vw - 16px, 760px);
+    width: min(100vw - (var(--page-gutter) * 2), 760px);
     padding-top: var(--space-4);
     padding-bottom: var(--space-6);
   }
