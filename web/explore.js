@@ -11,7 +11,10 @@
     scanBannerSummary: document.getElementById("scanBannerSummary"),
     scanBannerDetails: document.getElementById("scanBannerDetails"),
     summaryPath: document.getElementById("summaryPath"),
+    summaryCaption: document.getElementById("summaryCaption"),
     summarySize: document.getElementById("summarySize"),
+    summaryShownStat: document.getElementById("summaryShownStat"),
+    summaryShownLabel: document.getElementById("summaryShownLabel"),
     summaryShown: document.getElementById("summaryShown"),
     summaryItems: document.getElementById("summaryItems"),
     summaryScan: document.getElementById("summaryScan"),
@@ -198,7 +201,7 @@
       return;
     }
 
-    els.rootPath.textContent = `Root: ${state.config.analyze_root}`;
+    els.rootPath.textContent = state.config.analyze_root;
     els.rootPath.title = state.config.analyze_root;
   }
 
@@ -239,11 +242,16 @@
     let folderSize = "-";
     let shownSize = "-";
     let itemText = "-";
+    let showShownSize = false;
 
     if (state.currentView) {
-      folderSize = App.formatBytes(state.currentView.summary.total_bytes || 0);
-      shownSize = App.formatBytes(state.currentView.summary.visible_bytes || 0);
       const summary = state.currentView.summary;
+      const totalBytes = Number(summary.total_bytes || 0);
+      const visibleBytes = Number(summary.visible_bytes || 0);
+
+      folderSize = App.formatBytes(totalBytes);
+      shownSize = App.formatBytes(visibleBytes);
+      showShownSize = visibleBytes !== totalBytes;
       const visible = App.formatCount(summary.returned_item_count || 0);
       const matching = App.formatCount(summary.matching_item_count || 0);
       itemText = summary.is_result_truncated ? `${visible} / ${matching}` : `${matching}`;
@@ -253,9 +261,12 @@
       folderSize = App.formatBytes(state.currentScan.progress.scanned_bytes || 0);
     }
 
-    els.summaryPath.textContent = activePath;
+    els.summaryPath.textContent = buildSummaryPathLabel(activePath);
     els.summaryPath.title = activePath;
+    els.summaryCaption.textContent = buildSummaryCaption(activePath);
     els.summarySize.textContent = folderSize;
+    els.summaryShownStat.hidden = !showShownSize;
+    els.summaryShownLabel.textContent = "In view";
     els.summaryShown.textContent = shownSize;
     els.summaryItems.textContent = itemText;
     els.summaryScan.textContent = App.buildScanSummaryText(state.currentScan || state.latestCompletedScan);
@@ -772,6 +783,55 @@
     }
     const typeLabel = item.type === "dir" ? "Folder" : "File";
     return `${typeLabel} • ${App.formatBytes(item.size_bytes || 0)}`;
+  }
+
+  function buildSummaryPathLabel(activePath) {
+    const root = state.config?.analyze_root || "";
+    if (!activePath) {
+      return "Not scanned yet";
+    }
+    if (!root) {
+      return activePath;
+    }
+
+    const normalizedRoot = root.replace(/[\\/]+$/, "");
+    const normalizedPath = activePath.replace(/[\\/]+$/, "");
+    if (normalizedPath === normalizedRoot) {
+      return "Root folder";
+    }
+    if (!normalizedPath.startsWith(normalizedRoot)) {
+      return activePath;
+    }
+
+    const relativePath = normalizedPath.slice(normalizedRoot.length).replace(/^[/\\]+/, "");
+    return relativePath || "Root folder";
+  }
+
+  function buildSummaryCaption(activePath) {
+    if (state.pathLoading) {
+      return "Loading direct contents for this folder.";
+    }
+
+    if (!state.currentView) {
+      if (App.isScanActive(state.currentScan)) {
+        return "A scan is running. This summary will fill in when the first view is ready.";
+      }
+      return "Run a scan to inspect the configured root.";
+    }
+
+    const summary = state.currentView.summary;
+    if (summary.has_active_filters) {
+      return summary.is_result_truncated
+        ? "Filtered view with the largest matching direct entries."
+        : "Filtered view of the matching direct entries.";
+    }
+    if (summary.is_result_truncated) {
+      return "Showing the largest direct entries in this folder.";
+    }
+    if (activePath === state.config?.analyze_root) {
+      return "Configured root folder.";
+    }
+    return "Direct contents of the selected folder.";
   }
 
   function buildResultNote(summary) {

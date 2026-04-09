@@ -13,9 +13,11 @@
   <div class="app-shell app-shell--explore">
     <header class="app-header">
       <div class="app-heading">
-        <p class="eyebrow">Disk usage explorer</p>
         <h1>Disk Treemap</h1>
-        <p id="rootPath" class="root-path">Loading root...</p>
+        <div class="header-meta">
+          <span class="root-tag">Root</span>
+          <p id="rootPath" class="root-path">Loading root...</p>
+        </div>
       </div>
 
       <div class="header-actions">
@@ -29,68 +31,68 @@
       <div id="scanBannerDetails" class="scan-banner-details"></div>
     </section>
 
-    <section class="summary-strip" aria-label="Current view summary">
-      <div class="summary-card">
-        <span class="summary-label">Current folder</span>
-        <span id="summaryPath" class="summary-value summary-path">Not scanned yet</span>
+    <section class="surface control-bar" aria-label="Current view controls">
+      <div class="control-overview">
+        <div class="view-summary">
+          <p class="panel-kicker">Current view</p>
+          <h2 id="summaryPath" class="view-path">Not scanned yet</h2>
+          <p id="summaryCaption" class="view-caption">Run a scan to inspect the configured root.</p>
+        </div>
+
+        <div class="view-stats" aria-label="Current view summary">
+          <div class="stat-pill">
+            <span class="summary-label">Folder size</span>
+            <span id="summarySize" class="summary-value">-</span>
+          </div>
+          <div id="summaryShownStat" class="stat-pill" hidden>
+            <span id="summaryShownLabel" class="summary-label">In view</span>
+            <span id="summaryShown" class="summary-value">-</span>
+          </div>
+          <div class="stat-pill">
+            <span class="summary-label">Items</span>
+            <span id="summaryItems" class="summary-value">-</span>
+          </div>
+          <div class="stat-pill stat-pill--wide">
+            <span class="summary-label">Last scan</span>
+            <span id="summaryScan" class="summary-value summary-value--meta">No scan yet</span>
+          </div>
+        </div>
       </div>
-      <div class="summary-card">
-        <span class="summary-label">Folder size</span>
-        <span id="summarySize" class="summary-value">-</span>
-      </div>
-      <div class="summary-card">
-        <span class="summary-label">In tree</span>
-        <span id="summaryShown" class="summary-value">-</span>
-      </div>
-      <div class="summary-card">
-        <span class="summary-label">Items</span>
-        <span id="summaryItems" class="summary-value">-</span>
-      </div>
-      <div class="summary-card">
-        <span class="summary-label">Last scan</span>
-        <span id="summaryScan" class="summary-value">No scan yet</span>
+
+      <div class="toolbar-row">
+        <div class="toolbar-grid toolbar-grid--explore">
+          <label class="field">
+            <span class="field-label">Search</span>
+            <input id="searchInput" type="text" placeholder="Name contains..." />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Type</span>
+            <select id="typeFilter">
+              <option value="">All</option>
+              <option value="dir">Dirs</option>
+              <option value="file">Files</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Min bytes</span>
+            <input id="minSizeInput" type="number" min="0" step="1" value="0" />
+          </label>
+
+          <label class="field">
+            <span class="field-label">Sort</span>
+            <select id="sortSelect"></select>
+          </label>
+        </div>
+
+        <button id="clearFiltersButton" class="ghost-button toolbar-clear" type="button" hidden>Clear filters</button>
       </div>
     </section>
 
     <section id="appAlert" class="app-alert" hidden aria-live="polite">
       <div id="appAlertText" class="app-alert-text"></div>
       <button id="alertRetryButton" class="alert-button" type="button" hidden>Run Scan Again</button>
-    </section>
-
-    <section class="surface toolbar">
-      <div class="toolbar-header">
-        <div>
-          <p class="panel-kicker">View options</p>
-          <h2>Filter current view</h2>
-        </div>
-        <button id="clearFiltersButton" class="ghost-button" type="button" hidden>Clear filters</button>
-      </div>
-
-      <div class="toolbar-grid toolbar-grid--explore">
-        <label class="field">
-          <span class="field-label">Search</span>
-          <input id="searchInput" type="text" placeholder="Name contains..." />
-        </label>
-
-        <label class="field">
-          <span class="field-label">Type</span>
-          <select id="typeFilter">
-            <option value="">All</option>
-            <option value="dir">Dirs</option>
-            <option value="file">Files</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Min bytes</span>
-          <input id="minSizeInput" type="number" min="0" step="1" value="0" />
-        </label>
-
-        <label class="field">
-          <span class="field-label">Sort</span>
-          <select id="sortSelect"></select>
-        </label>
-      </div>
     </section>
 
     <main class="workspace">
