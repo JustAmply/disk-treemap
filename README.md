@@ -66,10 +66,17 @@ docker compose up -d --build
 - `POST /api/v1/scans`
 - `GET /api/v1/scans?limit=<n>&status=<queued|running|completed|failed>`
 - `GET /api/v1/scans/{scan_id}`
+- `GET /api/v1/scans/{scan_id}/explore?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 - `DELETE /api/v1/scans/{scan_id}`
 - `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 - `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 - `GET /api/v1/scans/{target_scan_id}/diff?base_scan_id=<scan_id>&path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<delta_desc|delta_asc|size_desc|size_asc|name_asc|name_desc>`
+
+Explore response fields:
+
+- `summary` for the current folder, including rendered bytes and truncation state
+- `items` for direct child folders/files in the current folder
+- `treemap` for the interactive folder-first tree layout used by the UI
 
 Diff response fields:
 

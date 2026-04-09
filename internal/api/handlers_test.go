@@ -120,6 +120,49 @@ func TestScansCollectionRejectsGet(t *testing.T) {
 	}
 }
 
+func TestExploreEndpointReturnsSummaryAndItems(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 30, MtimeUnix: 1},
+		{Path: filepath.Join(root, "alpha"), ParentPath: root, Name: "alpha", Kind: "dir", SizeBytes: 20, MtimeUnix: 1},
+		{Path: filepath.Join(root, "beta.log"), ParentPath: root, Name: "beta.log", Kind: "file", SizeBytes: 10, MtimeUnix: 1},
+	})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+strconv.FormatInt(scanID, 10)+"/explore?path="+url.QueryEscape(root), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Summary struct {
+			MatchingItemCount int64 `json:"matching_item_count"`
+		} `json:"summary"`
+		Items []store.Node `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	if payload.Summary.MatchingItemCount != 2 {
+		t.Fatalf("expected 2 matching items, got %d", payload.Summary.MatchingItemCount)
+	}
+	if len(payload.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(payload.Items))
+	}
+}
+
 func TestDeleteScanEndpointRemoved(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()

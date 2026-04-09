@@ -68,6 +68,32 @@ func TestListChildrenWithFilters(t *testing.T) {
 	}
 }
 
+func TestAggregateChildrenWithOptions(t *testing.T) {
+	st := newTestStore(t)
+	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 75},
+		{Path: "/scanroot/logs", ParentPath: "/scanroot", Name: "logs", Kind: "dir", SizeBytes: 50},
+		{Path: "/scanroot/a.bin", ParentPath: "/scanroot", Name: "a.bin", Kind: "file", SizeBytes: 20},
+		{Path: "/scanroot/b.log", ParentPath: "/scanroot", Name: "b.log", Kind: "file", SizeBytes: 5},
+	})
+
+	agg, err := st.AggregateChildrenWithOptions(context.Background(), scanID, "/scanroot", NodeQueryOptions{
+		Query:   ".",
+		Kind:    "file",
+		MinSize: 10,
+	})
+	if err != nil {
+		t.Fatalf("aggregate children: %v", err)
+	}
+
+	if agg.Count != 1 {
+		t.Fatalf("expected 1 matching child, got %d", agg.Count)
+	}
+	if agg.TotalBytes != 20 {
+		t.Fatalf("expected 20 matching bytes, got %d", agg.TotalBytes)
+	}
+}
+
 func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	st := newTestStore(t)
 

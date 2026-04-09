@@ -1,9 +1,9 @@
 window.DiskTreemapApp = (() => {
   const sortOptions = [
-    { value: "size_desc", label: "Size desc" },
-    { value: "size_asc", label: "Size asc" },
-    { value: "name_asc", label: "Name asc" },
-    { value: "name_desc", label: "Name desc" },
+    { value: "size_desc", label: "Largest first" },
+    { value: "size_asc", label: "Smallest first" },
+    { value: "name_asc", label: "Name A-Z" },
+    { value: "name_desc", label: "Name Z-A" },
   ];
 
   function clearChildren(element) {
@@ -31,10 +31,10 @@ window.DiskTreemapApp = (() => {
     if (!path) {
       return "-";
     }
-    if (path.length <= 68) {
+    if (path.length <= 72) {
       return path;
     }
-    return `${path.slice(0, 18)}...${path.slice(-42)}`;
+    return `${path.slice(0, 20)}...${path.slice(-44)}`;
   }
 
   function formatElapsed(startedAtIso) {
@@ -72,6 +72,10 @@ window.DiskTreemapApp = (() => {
       unit += 1;
     }
     return `${size.toFixed(size >= 10 || unit === 0 ? 1 : 2)} ${units[unit]}`;
+  }
+
+  function formatCount(value) {
+    return Number(value || 0).toLocaleString();
   }
 
   function formatPercent(part, total) {
@@ -209,8 +213,21 @@ window.DiskTreemapApp = (() => {
     return queryString ? `${pathname}?${queryString}` : pathname;
   }
 
+  function updateUrl(pathname, params, replace = true) {
+    const url = buildUrl(pathname, params);
+    if (replace) {
+      window.history.replaceState({}, "", url);
+      return;
+    }
+    window.history.pushState({}, "", url);
+  }
+
   function replaceUrl(pathname, params) {
-    window.history.replaceState({}, "", buildUrl(pathname, params));
+    updateUrl(pathname, params, true);
+  }
+
+  function pushUrl(pathname, params) {
+    updateUrl(pathname, params, false);
   }
 
   function readExploreUrlState() {
@@ -233,7 +250,7 @@ window.DiskTreemapApp = (() => {
     console.warn(`Scan #${scan.id} completed with ${warnings} warning(s). Check server logs for details.`);
   }
 
-  async function apiRequest(url, options) {
+  async function apiRequest(url, options = {}) {
     const response = await fetch(url, options);
     if (response.status === 204) {
       return null;
@@ -253,37 +270,48 @@ window.DiskTreemapApp = (() => {
     return body;
   }
 
-  async function apiGet(url) {
-    return apiRequest(url, { method: "GET" });
+  async function apiGet(url, options = {}) {
+    return apiRequest(url, { ...options, method: "GET" });
   }
 
-  async function apiPost(url) {
-    return apiRequest(url, { method: "POST" });
+  async function apiPost(url, options = {}) {
+    return apiRequest(url, { ...options, method: "POST" });
   }
 
-  function renderLargestItems(container, items, onNavigate) {
+  function renderItemList(container, items, options) {
+    const { activePath, onFocus, onNavigate } = options;
     clearChildren(container);
+
     items.forEach((item) => {
       const row = document.createElement("div");
       row.className = "item-row";
+      row.dataset.type = item.type;
+      if (item.path === activePath) {
+        row.dataset.active = "true";
+      }
 
       const main = document.createElement("div");
       main.className = "item-main";
 
-      const nameEl = document.createElement(item.type === "dir" ? "button" : "span");
-      nameEl.className = item.type === "dir" ? "item-link" : "item-name";
-      nameEl.textContent = item.name;
-      nameEl.title = item.path;
-
-      if (item.type === "dir") {
-        nameEl.type = "button";
-        nameEl.addEventListener("click", () => onNavigate(item.path, item.name));
-      }
+      const titleButton = document.createElement("button");
+      titleButton.type = "button";
+      titleButton.className = "item-title";
+      titleButton.textContent = item.name;
+      titleButton.title = item.path;
+      titleButton.addEventListener("click", () => {
+        onFocus(item);
+        if (item.type === "dir") {
+          onNavigate(item.path, item.name);
+        }
+      });
 
       const subtext = document.createElement("div");
       subtext.className = "item-subtext";
       subtext.textContent = shortPath(item.path);
       subtext.title = item.path;
+
+      const metadata = document.createElement("div");
+      metadata.className = "item-metadata";
 
       const type = document.createElement("span");
       type.className = "item-type";
@@ -294,81 +322,141 @@ window.DiskTreemapApp = (() => {
       size.className = "item-size";
       size.textContent = formatBytes(item.size_bytes || 0);
 
-      main.append(nameEl, subtext);
-      row.append(main, type, size);
+      metadata.append(type, size);
+
+      main.append(titleButton, subtext);
+      row.append(main, metadata);
+
+      if (item.type === "dir") {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "item-action";
+        action.textContent = "Open";
+        action.addEventListener("click", () => onNavigate(item.path, item.name));
+        row.appendChild(action);
+      } else {
+        const spacer = document.createElement("div");
+        spacer.className = "item-action item-action--placeholder";
+        spacer.setAttribute("aria-hidden", "true");
+        row.appendChild(spacer);
+      }
+
       container.appendChild(row);
     });
   }
 
-  function renderTreemap(container, tooltipEl, view, onNavigate) {
+  function renderTreemap(container, tooltipEl, treeData, options) {
     clearChildren(container);
-    if (!window.d3) {
+    hideTooltip(tooltipEl);
+
+    if (!window.d3 || !treeData) {
       return;
     }
 
     const width = Math.max(container.clientWidth, 320);
     const height = Math.max(container.clientHeight, 320);
-    const data = {
-      name: basename(view.path),
-      path: view.path,
-      children: view.chartItems.map((item) => ({
-        ...item,
-        value: Math.max(item.visualValue, 1),
-      })),
-    };
+    const root = prepareTreemapHierarchy(treeData, width, height);
 
-    const root = d3
-      .hierarchy(data)
-      .sum((item) => item.value || 0)
-      .sort((a, b) => (b.value || 0) - (a.value || 0));
-
-    d3.treemap().size([width, height]).paddingInner(3).round(true)(root);
+    const total = root.value || 0;
+    const nodes = root
+      .descendants()
+      .filter((node) => node.depth > 0 && node.x1 - node.x0 >= 3 && node.y1 - node.y0 >= 3);
 
     const svg = d3
       .select(container)
       .append("svg")
       .attr("width", width)
       .attr("height", height)
-      .attr("viewBox", `0 0 ${width} ${height}`);
+      .attr("viewBox", `0 0 ${width} ${height}`)
+      .attr("role", "img")
+      .attr("aria-label", "Treemap of the current folder");
 
     const node = svg
       .selectAll("g")
-      .data(root.leaves())
+      .data(nodes)
       .enter()
       .append("g")
-      .attr("class", (d) => `node node--${d.data.colorClass}${d.data.clickable ? " node--interactive" : ""}`)
+      .attr("class", (d) => buildTreemapClassName(d, options.activePath))
       .attr("transform", (d) => `translate(${d.x0},${d.y0})`);
 
     node
       .append("rect")
       .attr("width", (d) => Math.max(0, d.x1 - d.x0))
       .attr("height", (d) => Math.max(0, d.y1 - d.y0))
-      .attr("rx", 10)
-      .attr("ry", 10)
+      .attr("rx", (d) => getNodeRadius(d))
+      .attr("ry", (d) => getNodeRadius(d))
+      .attr("tabindex", 0)
+      .on("mousemove", (event, d) => showTooltip(tooltipEl, event.clientX, event.clientY, buildTreemapTooltip(d, total)))
+      .on("mouseleave", () => hideTooltip(tooltipEl))
       .on("click", (_, d) => {
-        if (!d.data.clickable) {
+        options.onFocus(d.data);
+        if (d.data.clickable) {
+          options.onNavigate(d.data.path, d.data.name);
+        }
+      })
+      .on("keydown", (event, d) => {
+        if (event.key !== "Enter" && event.key !== " ") {
           return;
         }
-        onNavigate(d.data.path, d.data.name);
-      })
-      .on("mousemove", (event, d) => showTooltip(tooltipEl, event.clientX, event.clientY, d.data.tooltip))
-      .on("mouseleave", () => hideTooltip(tooltipEl));
+        event.preventDefault();
+        options.onFocus(d.data);
+        if (d.data.clickable) {
+          options.onNavigate(d.data.path, d.data.name);
+        }
+      });
 
     node
       .filter((d) => shouldShowLabel(d))
       .append("text")
-      .attr("class", "node-label")
+      .attr("class", (d) => `node-label node-label--depth-${Math.min(d.depth, 3)}`)
       .attr("x", 10)
-      .attr("y", 18)
-      .text((d) => truncateLabel(d.data.name, d.x1 - d.x0, 12));
+      .attr("y", (d) => (hasNodeHeader(d) ? 17 : 15))
+      .text((d) => truncateLabel(d.data.name, d.x1 - d.x0, d.depth === 1 ? 12 : 11));
 
     node
       .filter((d) => shouldShowMeta(d))
       .append("text")
-      .attr("class", "node-meta")
+      .attr("class", (d) => `node-meta node-meta--depth-${Math.min(d.depth, 3)}`)
       .attr("x", 10)
-      .attr("y", 34)
-      .text((d) => d.data.metaLabel);
+      .attr("y", (d) => (hasNodeHeader(d) ? 34 : 29))
+      .text((d) => {
+        if (d.data.synthetic) {
+          return `${formatCount(d.data.hidden_item_count || 0)} hidden`;
+        }
+        return formatBytes(d.data.size_bytes || 0);
+      });
+  }
+
+  function buildTreemapClassName(node, activePath) {
+    const classes = ["node", `node--${node.data.type || "file"}`, `node--depth-${Math.min(node.depth, 3)}`];
+    if (node.data.clickable) {
+      classes.push("node--interactive");
+    }
+    if (node.data.synthetic) {
+      classes.push("node--synthetic");
+    }
+    if (activePath && node.data.path === activePath) {
+      classes.push("node--active");
+    }
+    return classes.join(" ");
+  }
+
+  function buildTreemapTooltip(node, total) {
+    const lines = [`<strong>${escapeHtml(node.data.name)}</strong>`];
+    if (node.data.path) {
+      lines.push(escapeHtml(shortPath(node.data.path)));
+    }
+
+    const sizeText = `${formatBytes(node.data.size_bytes || 0)} (${formatPercent(node.value || 0, total)})`;
+    lines.push(sizeText);
+
+    if (node.data.synthetic) {
+      lines.push(`${formatCount(node.data.hidden_item_count || 0)} hidden items`);
+    } else {
+      lines.push(node.data.type === "dir" ? "Folder" : "File");
+    }
+
+    return lines.join("<br>");
   }
 
   function showTooltip(tooltipEl, x, y, html) {
@@ -393,25 +481,171 @@ window.DiskTreemapApp = (() => {
   function shouldShowLabel(node) {
     const width = node.x1 - node.x0;
     const height = node.y1 - node.y0;
-    return width >= 92 && height >= 42;
+    return width >= 82 && height >= 26;
   }
 
   function shouldShowMeta(node) {
     const width = node.x1 - node.x0;
     const height = node.y1 - node.y0;
-    return width >= 120 && height >= 58;
+    return width >= 112 && height >= 44;
   }
 
   function truncateLabel(label, width, fontSize) {
-    const maxChars = Math.max(6, Math.floor((width - 18) / (fontSize * 0.62)));
+    const maxChars = Math.max(5, Math.floor((width - 18) / (fontSize * 0.58)));
     if (label.length <= maxChars) {
       return label;
     }
     return `${label.slice(0, maxChars - 1)}...`;
   }
 
+  function computeTreemapValue(item) {
+    if (Array.isArray(item.children) && item.children.length > 0) {
+      return 0;
+    }
+    return Math.max(Number(item.size_bytes || 0), 1);
+  }
+
+  function prepareTreemapHierarchy(treeData, width, height) {
+    const preparedData = cloneTreemapNode(treeData);
+    let root = buildTreemapHierarchy(preparedData, width, height);
+    let changed = false;
+
+    root.descendants().forEach((node) => {
+      if (!Array.isArray(node.data.children) || node.data.children.length === 0 || node.depth === 0) {
+        return;
+      }
+
+      if (!shouldExpandNode(node)) {
+        node.data.children = [];
+        changed = true;
+        return;
+      }
+
+      if (groupTinyChildren(node)) {
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      root = buildTreemapHierarchy(preparedData, width, height);
+    }
+
+    return root;
+  }
+
+  function buildTreemapHierarchy(treeData, width, height) {
+    const root = d3
+      .hierarchy(treeData)
+      .sum((item) => computeTreemapValue(item))
+      .sort((a, b) => (b.value || 0) - (a.value || 0));
+
+    d3
+      .treemap()
+      .tile(d3.treemapResquarify)
+      .size([width, height])
+      .paddingOuter(6)
+      .paddingInner((node) => (node.depth <= 1 ? 4 : 2))
+      .paddingTop((node) => getTreemapHeaderPadding(node))
+      .round(true)(root);
+
+    return root;
+  }
+
+  function cloneTreemapNode(node) {
+    return {
+      ...node,
+      children: Array.isArray(node.children) ? node.children.map(cloneTreemapNode) : undefined,
+    };
+  }
+
+  function shouldExpandNode(node) {
+    const width = node.x1 - node.x0;
+    const height = node.y1 - node.y0;
+    const area = width * height;
+    const shortestSide = Math.min(width, height);
+
+    if (node.depth === 1) {
+      return area >= 32000 && shortestSide >= 150 && width >= 170;
+    }
+
+    return area >= 22000 && shortestSide >= 120;
+  }
+
+  function groupTinyChildren(node) {
+    const width = node.x1 - node.x0;
+    const height = node.y1 - node.y0;
+    const nodeArea = width * height;
+    const parentSize = Math.max(Number(node.data.size_bytes || 0), 1);
+    const children = Array.isArray(node.data.children) ? node.data.children : [];
+
+    if (children.length < 4 || nodeArea < 26000) {
+      return false;
+    }
+
+    const groupedChildren = [];
+    let hiddenCount = 0;
+    let hiddenBytes = 0;
+
+    children.forEach((child, index) => {
+      if (child.synthetic) {
+        groupedChildren.push(child);
+        return;
+      }
+
+      const childSize = Math.max(Number(child.size_bytes || 0), 1);
+      const estimatedArea = (childSize / parentSize) * nodeArea;
+      const keepBecauseLarge = index < 2 || estimatedArea >= 2600 || childSize / parentSize >= 0.09;
+
+      if (keepBecauseLarge) {
+        groupedChildren.push(child);
+        return;
+      }
+
+      hiddenCount += 1;
+      hiddenBytes += childSize;
+    });
+
+    if (hiddenCount === 0) {
+      return false;
+    }
+
+    groupedChildren.push({
+      name: hiddenCount === 1 ? "1 smaller item" : `${hiddenCount} smaller items`,
+      type: "group",
+      size_bytes: hiddenBytes,
+      clickable: false,
+      synthetic: true,
+      hidden_item_count: hiddenCount,
+    });
+
+    node.data.children = groupedChildren;
+    return true;
+  }
+
+  function hasNodeHeader(node) {
+    return Boolean(node.children?.length) && getTreemapHeaderPadding(node) > 0;
+  }
+
+  function getTreemapHeaderPadding(node) {
+    const width = node.x1 - node.x0;
+    const height = node.y1 - node.y0;
+    if (!node.children?.length || node.data.type !== "dir") {
+      return 0;
+    }
+    if (width < 96 || height < 54) {
+      return 0;
+    }
+    return node.depth === 1 ? 24 : 20;
+  }
+
+  function getNodeRadius(node) {
+    const width = node.x1 - node.x0;
+    const height = node.y1 - node.y0;
+    const base = node.depth === 1 ? 14 : 10;
+    return Math.max(3, Math.min(base, width / 7, height / 7));
+  }
+
   return {
-    sortOptions,
     apiGet,
     apiPost,
     basename,
@@ -421,18 +655,21 @@ window.DiskTreemapApp = (() => {
     debounce,
     escapeHtml,
     formatBytes,
+    formatCount,
     formatElapsed,
     formatPercent,
     getStatusChip,
     isScanActive,
     logScanWarnings,
     parsePositiveInt,
+    pushUrl,
     readExploreUrlState,
     renderBreadcrumb,
-    renderLargestItems,
+    renderItemList,
     renderStatusChip,
     renderTreemap,
     replaceUrl,
     shortPath,
+    sortOptions,
   };
 })();

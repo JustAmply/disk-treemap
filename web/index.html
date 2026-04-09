@@ -35,8 +35,12 @@
         <span id="summaryPath" class="summary-value summary-path">Not scanned yet</span>
       </div>
       <div class="summary-card">
-        <span class="summary-label">In view</span>
+        <span class="summary-label">Folder size</span>
         <span id="summarySize" class="summary-value">-</span>
+      </div>
+      <div class="summary-card">
+        <span class="summary-label">In tree</span>
+        <span id="summaryShown" class="summary-value">-</span>
       </div>
       <div class="summary-card">
         <span class="summary-label">Items</span>
@@ -92,12 +96,16 @@
     <main class="workspace">
       <section class="surface main-panel">
         <div class="panel-header">
-          <div>
-            <p class="panel-kicker">Visualization</p>
-            <h2>Treemap</h2>
-          </div>
+        <div>
+          <p class="panel-kicker">Visualization</p>
+          <h2>Treemap</h2>
+          <p id="resultNote" class="panel-note">Run a scan to load the first interactive treemap.</p>
+        </div>
 
-          <div class="legend" aria-label="Legend">
+          <div class="panel-actions">
+            <button id="goUpButton" class="ghost-button" type="button">Up one level</button>
+
+            <div class="legend" aria-label="Legend">
             <span class="legend-item">
               <span class="legend-swatch legend-swatch-dir"></span>
               Folders
@@ -106,6 +114,7 @@
               <span class="legend-swatch legend-swatch-file"></span>
               Files
             </span>
+            </div>
           </div>
         </div>
 
@@ -131,14 +140,22 @@
               <p class="panel-kicker">Explore</p>
               <h2>Inspector</h2>
             </div>
-            <p id="inspectorMeta" class="inspector-meta">Largest items in the current view.</p>
+            <p id="inspectorMeta" class="inspector-meta">Current folder inventory.</p>
           </div>
 
           <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
 
+          <section id="selectedCard" class="selected-card" hidden>
+            <p class="panel-kicker">Selection</p>
+            <h3 id="selectedTitle">Current folder</h3>
+            <p id="selectedMeta" class="section-note">Folder</p>
+            <p id="selectedPath" class="selected-path">-</p>
+            <button id="selectedAction" class="ghost-button selected-action" type="button" hidden>Open folder</button>
+          </section>
+
           <section class="inspector-section detail-section">
             <div class="section-heading">
-              <h3 id="detailTitle">Largest items</h3>
+              <h3 id="detailTitle">Items in this folder</h3>
               <p id="detailSummary" class="section-note">No scan data yet.</p>
             </div>
 

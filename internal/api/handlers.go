@@ -131,6 +131,8 @@ func (h *Handler) handleScanRoutes(w http.ResponseWriter, r *http.Request) {
 	switch parts[1] {
 	case "children":
 		h.handleGetChildren(w, r, scanID)
+	case "explore":
+		h.handleGetExplore(w, r, scanID)
 	case "largest":
 		h.handleGetLargest(w, r, scanID)
 	default:
@@ -175,6 +177,38 @@ func (h *Handler) handleGetChildren(w http.ResponseWriter, r *http.Request, scan
 	}
 
 	resp, err := h.svc.GetChildren(r.Context(), scanID, r.URL.Query().Get("path"), app.NodeQueryOptions{
+		Limit:   limit,
+		Query:   strings.TrimSpace(r.URL.Query().Get("q")),
+		Kind:    strings.TrimSpace(r.URL.Query().Get("type")),
+		MinSize: minSize,
+		Sort:    strings.TrimSpace(r.URL.Query().Get("sort")),
+	})
+	if err != nil {
+		h.handleDomainError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleGetExplore(w http.ResponseWriter, r *http.Request, scanID int64) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	limit, err := parseIntQuery(r, "limit", h.cfg.MaxChildrenPerQuery)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	minSize, err := parseInt64Query(r, "min_size", 0)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	resp, err := h.svc.GetExplore(r.Context(), scanID, r.URL.Query().Get("path"), app.NodeQueryOptions{
 		Limit:   limit,
 		Query:   strings.TrimSpace(r.URL.Query().Get("q")),
 		Kind:    strings.TrimSpace(r.URL.Query().Get("type")),

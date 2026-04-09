@@ -14,7 +14,13 @@ import (
 	"github.com/justamply/disk-treemap/internal/store"
 )
 
-const minProgressInterval = 10 * time.Millisecond
+const (
+	minProgressInterval         = 10 * time.Millisecond
+	exploreExpandedDirLimit     = 12
+	exploreBranchLimit          = 14
+	exploreTreemapNodeBudget    = 240
+	exploreSyntheticNodeMinByte = 1
+)
 
 var (
 	ErrScanRunning  = errors.New("scan already running")
@@ -62,6 +68,38 @@ type LargestResponse struct {
 	ScanID int64        `json:"scan_id"`
 	Path   string       `json:"path"`
 	Items  []store.Node `json:"items"`
+}
+
+type ExploreSummary struct {
+	Name              string `json:"name"`
+	TotalBytes        int64  `json:"total_bytes"`
+	VisibleBytes      int64  `json:"visible_bytes"`
+	MatchingItemCount int64  `json:"matching_item_count"`
+	ReturnedItemCount int    `json:"returned_item_count"`
+	VisibleDirCount   int    `json:"visible_dir_count"`
+	VisibleFileCount  int    `json:"visible_file_count"`
+	HiddenItemCount   int64  `json:"hidden_item_count"`
+	HasActiveFilters  bool   `json:"has_active_filters"`
+	IsResultTruncated bool   `json:"is_result_truncated"`
+}
+
+type ExploreTreemapNode struct {
+	Name            string               `json:"name"`
+	Path            string               `json:"path,omitempty"`
+	Type            string               `json:"type"`
+	SizeBytes       int64                `json:"size_bytes"`
+	Clickable       bool                 `json:"clickable"`
+	Synthetic       bool                 `json:"synthetic,omitempty"`
+	HiddenItemCount int64                `json:"hidden_item_count,omitempty"`
+	Children        []ExploreTreemapNode `json:"children,omitempty"`
+}
+
+type ExploreResponse struct {
+	ScanID  int64              `json:"scan_id"`
+	Path    string             `json:"path"`
+	Summary ExploreSummary     `json:"summary"`
+	Items   []store.Node       `json:"items"`
+	Treemap ExploreTreemapNode `json:"treemap"`
 }
 
 func NewService(cfg config.Config, st *store.Store) *Service {
@@ -434,8 +472,200 @@ func (s *Service) GetLargest(ctx context.Context, scanID int64, requestedPath st
 	}, nil
 }
 
+func (s *Service) GetExplore(ctx context.Context, scanID int64, requestedPath string, opts NodeQueryOptions) (ExploreResponse, error) {
+	path, err := pathutil.NormalizeWithinRoot(s.cfg.AnalyzeRoot, requestedPath)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	normalized, err := normalizeNodeQueryOptions(opts, s.cfg.MaxChildrenPerQuery, "size_desc")
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	currentNode, err := s.store.GetNode(ctx, scanID, path)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	items, err := s.store.ListChildrenWithOptions(ctx, scanID, path, store.NodeQueryOptions{
+		Limit:   normalized.Limit,
+		Query:   normalized.Query,
+		Kind:    normalized.Kind,
+		MinSize: normalized.MinSize,
+		Sort:    normalized.Sort,
+	})
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	aggregate, err := s.store.AggregateChildrenWithOptions(ctx, scanID, path, store.NodeQueryOptions{
+		Query:   normalized.Query,
+		Kind:    normalized.Kind,
+		MinSize: normalized.MinSize,
+	})
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	summary := ExploreSummary{
+		Name:              currentNode.Name,
+		TotalBytes:        currentNode.SizeBytes,
+		VisibleBytes:      aggregate.TotalBytes,
+		MatchingItemCount: aggregate.Count,
+		ReturnedItemCount: len(items),
+		HiddenItemCount:   maxInt64(aggregate.Count-int64(len(items)), 0),
+		HasActiveFilters:  normalized.Query != "" || normalized.Kind != "" || normalized.MinSize > 0,
+	}
+	summary.IsResultTruncated = summary.HiddenItemCount > 0
+	for _, item := range items {
+		switch item.Kind {
+		case "dir":
+			summary.VisibleDirCount++
+		case "file":
+			summary.VisibleFileCount++
+		}
+	}
+
+	treemap, err := s.buildExploreTreemap(ctx, scanID, currentNode, items, aggregate, summary.HasActiveFilters)
+	if err != nil {
+		return ExploreResponse{}, err
+	}
+
+	return ExploreResponse{
+		ScanID:  scanID,
+		Path:    path,
+		Summary: summary,
+		Items:   items,
+		Treemap: treemap,
+	}, nil
+}
+
 func (s *Service) Config() config.Config {
 	return s.cfg
+}
+
+func (s *Service) buildExploreTreemap(
+	ctx context.Context,
+	scanID int64,
+	rootNode store.Node,
+	items []store.Node,
+	aggregate store.ChildAggregate,
+	hasFilters bool,
+) (ExploreTreemapNode, error) {
+	root := toTreemapNode(rootNode)
+	root.Clickable = false
+	root.Children = make([]ExploreTreemapNode, 0, len(items)+1)
+
+	var renderedBytes int64
+	for _, item := range items {
+		root.Children = append(root.Children, toTreemapNode(item))
+		renderedBytes += item.SizeBytes
+	}
+
+	hiddenRootItems := aggregate.Count - int64(len(items))
+	hiddenRootBytes := aggregate.TotalBytes - renderedBytes
+	if hiddenRootBytes < 0 {
+		hiddenRootBytes = 0
+	}
+	if hiddenRootItems > 0 {
+		root.Children = append(root.Children, buildSyntheticTreemapNode(hiddenRootItems, hiddenRootBytes))
+	}
+
+	if hasFilters || len(root.Children) == 0 {
+		return root, nil
+	}
+
+	remainingBudget := exploreTreemapNodeBudget - len(root.Children)
+	if remainingBudget <= 1 {
+		return root, nil
+	}
+
+	expandedDirs := 0
+	for idx := range root.Children {
+		child := &root.Children[idx]
+		if child.Type != "dir" || child.Synthetic {
+			continue
+		}
+		if expandedDirs >= exploreExpandedDirLimit || remainingBudget <= 1 {
+			break
+		}
+
+		aggregate, err := s.store.AggregateChildrenWithOptions(ctx, scanID, child.Path, store.NodeQueryOptions{})
+		if err != nil {
+			return ExploreTreemapNode{}, err
+		}
+		if aggregate.Count == 0 {
+			continue
+		}
+
+		branchLimit := minInt(exploreBranchLimit, remainingBudget)
+		if branchLimit < 1 {
+			break
+		}
+
+		grandchildren, err := s.store.ListChildrenWithOptions(ctx, scanID, child.Path, store.NodeQueryOptions{
+			Limit: branchLimit,
+			Sort:  "size_desc",
+		})
+		if err != nil {
+			return ExploreTreemapNode{}, err
+		}
+		if len(grandchildren) == 0 {
+			continue
+		}
+
+		child.Children = make([]ExploreTreemapNode, 0, len(grandchildren)+1)
+		var renderedGrandchildBytes int64
+		for _, grandchild := range grandchildren {
+			child.Children = append(child.Children, toTreemapNode(grandchild))
+			renderedGrandchildBytes += grandchild.SizeBytes
+		}
+
+		hiddenGrandchildren := aggregate.Count - int64(len(grandchildren))
+		hiddenGrandchildBytes := child.SizeBytes - renderedGrandchildBytes
+		if hiddenGrandchildBytes < 0 {
+			hiddenGrandchildBytes = 0
+		}
+		if hiddenGrandchildren > 0 {
+			child.Children = append(child.Children, buildSyntheticTreemapNode(hiddenGrandchildren, hiddenGrandchildBytes))
+		}
+
+		expandedDirs++
+		remainingBudget -= len(grandchildren)
+	}
+
+	return root, nil
+}
+
+func toTreemapNode(node store.Node) ExploreTreemapNode {
+	return ExploreTreemapNode{
+		Name:      node.Name,
+		Path:      node.Path,
+		Type:      node.Kind,
+		SizeBytes: node.SizeBytes,
+		Clickable: node.Kind == "dir",
+	}
+}
+
+func buildSyntheticTreemapNode(hiddenCount, hiddenBytes int64) ExploreTreemapNode {
+	if hiddenBytes < exploreSyntheticNodeMinByte {
+		hiddenBytes = exploreSyntheticNodeMinByte
+	}
+
+	label := "remaining item"
+	if hiddenCount != 1 {
+		label = "remaining items"
+	}
+
+	return ExploreTreemapNode{
+		Name:            fmt.Sprintf("%d %s", hiddenCount, label),
+		Type:            "group",
+		SizeBytes:       hiddenBytes,
+		Clickable:       false,
+		Synthetic:       true,
+		HiddenItemCount: hiddenCount,
+	}
 }
 
 func normalizeNodeQueryOptions(opts NodeQueryOptions, maxLimit int, defaultSort string) (NodeQueryOptions, error) {
@@ -473,4 +703,18 @@ func isUnreadableScanResult(result scan.Result) bool {
 	}
 	// If every discovered non-root node is a warning-only node, the scan is effectively unreadable.
 	return result.TotalNodes <= result.WarningCount+1
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

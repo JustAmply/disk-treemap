@@ -12,6 +12,7 @@
     scanBannerDetails: document.getElementById("scanBannerDetails"),
     summaryPath: document.getElementById("summaryPath"),
     summarySize: document.getElementById("summarySize"),
+    summaryShown: document.getElementById("summaryShown"),
     summaryItems: document.getElementById("summaryItems"),
     summaryScan: document.getElementById("summaryScan"),
     appAlert: document.getElementById("appAlert"),
@@ -21,6 +22,8 @@
     typeFilter: document.getElementById("typeFilter"),
     minSizeInput: document.getElementById("minSizeInput"),
     sortSelect: document.getElementById("sortSelect"),
+    goUpButton: document.getElementById("goUpButton"),
+    resultNote: document.getElementById("resultNote"),
     chartFrame: document.getElementById("chartFrame"),
     chartEmpty: document.getElementById("chartEmpty"),
     emptyStateTitle: document.getElementById("emptyStateTitle"),
@@ -29,6 +32,11 @@
     chart: document.getElementById("chart"),
     inspectorMeta: document.getElementById("inspectorMeta"),
     breadcrumb: document.getElementById("breadcrumb"),
+    selectedCard: document.getElementById("selectedCard"),
+    selectedTitle: document.getElementById("selectedTitle"),
+    selectedMeta: document.getElementById("selectedMeta"),
+    selectedPath: document.getElementById("selectedPath"),
+    selectedAction: document.getElementById("selectedAction"),
     detailTitle: document.getElementById("detailTitle"),
     detailSummary: document.getElementById("detailSummary"),
     detailList: document.getElementById("detailList"),
@@ -50,10 +58,13 @@
     viewedScanId: null,
     currentPath: null,
     currentView: null,
+    activeItem: null,
     pathLoading: false,
     alert: null,
     pollingHandle: null,
     resizeHandle: null,
+    resizeObserver: null,
+    viewAbortController: null,
     filters: { ...defaultFilters },
     urlState: App.readExploreUrlState(),
   };
@@ -73,6 +84,7 @@
 
   async function init() {
     bindEvents();
+    bindResizeObserver();
     syncSortOptions();
     syncFilterInputs();
     renderAll();
@@ -115,10 +127,11 @@
       queueSearchApply();
     });
     els.searchInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        applyFiltersFromInputs().catch((err) => showAlert(`Could not apply filters: ${err.message}`));
+      if (event.key !== "Enter") {
+        return;
       }
+      event.preventDefault();
+      applyFiltersFromInputs().catch((err) => showAlert(`Could not apply filters: ${err.message}`));
     });
     els.typeFilter.addEventListener("change", () => {
       applyFiltersFromInputs().catch((err) => showAlert(`Could not apply filters: ${err.message}`));
@@ -129,7 +142,21 @@
     els.sortSelect.addEventListener("change", () => {
       applyFiltersFromInputs().catch((err) => showAlert(`Could not apply filters: ${err.message}`));
     });
+    els.goUpButton.addEventListener("click", navigateToParent);
+    els.selectedAction.addEventListener("click", () => {
+      if (state.activeItem?.type === "dir" && state.activeItem.path) {
+        navigateToPath(state.activeItem.path, state.activeItem.name);
+      }
+    });
     window.addEventListener("resize", scheduleTreemapRender);
+  }
+
+  function bindResizeObserver() {
+    if (!window.ResizeObserver) {
+      return;
+    }
+    state.resizeObserver = new ResizeObserver(() => scheduleTreemapRender());
+    state.resizeObserver.observe(els.chartFrame);
   }
 
   function chooseInitialViewScanId() {
@@ -151,7 +178,9 @@
     renderSummary();
     renderAlert();
     renderToolbarState();
+    renderGoUpState();
     renderBreadcrumb();
+    renderSelectedCard();
     renderDetailList();
     renderChartArea();
     App.renderStatusChip(els.scanState, state.currentScan || state.latestCompletedScan || null);
@@ -192,7 +221,7 @@
       return;
     }
 
-    els.scanBannerSummary.textContent = `Scanning ${scannedNodes} items and ${scannedBytes}`;
+    els.scanBannerSummary.textContent = `Scanning ${App.formatCount(scannedNodes)} items and ${scannedBytes}`;
     els.scanBannerDetails.textContent = `Current: ${App.shortPath(currentPath)} | Elapsed: ${elapsed}`;
   }
 
@@ -201,27 +230,27 @@
       ? state.currentPath || state.currentView?.path || state.config?.analyze_root || "Not scanned yet"
       : state.currentView?.path || state.currentPath || state.config?.analyze_root || "Not scanned yet";
 
-    let size = "-";
-    if (state.currentView) {
-      size = App.formatBytes(state.currentView.totalBytes);
-    } else if (state.latestCompletedScan?.status === "completed") {
-      size = App.formatBytes(state.latestCompletedScan.total_bytes || 0);
-    } else if (state.currentScan?.progress) {
-      size = App.formatBytes(state.currentScan.progress.scanned_bytes || 0);
-    }
-
+    let folderSize = "-";
+    let shownSize = "-";
     let itemText = "-";
+
     if (state.currentView) {
-      itemText = `${state.currentView.itemCount} visible`;
-    } else if (state.currentScan?.progress) {
-      itemText = `${state.currentScan.progress.scanned_nodes} scanned`;
+      folderSize = App.formatBytes(state.currentView.summary.total_bytes || 0);
+      shownSize = App.formatBytes(state.currentView.summary.visible_bytes || 0);
+      const summary = state.currentView.summary;
+      const visible = App.formatCount(summary.returned_item_count || 0);
+      const matching = App.formatCount(summary.matching_item_count || 0);
+      itemText = summary.is_result_truncated ? `${visible} / ${matching}` : `${matching}`;
     } else if (state.latestCompletedScan?.status === "completed") {
-      itemText = `${state.latestCompletedScan.total_nodes} total`;
+      folderSize = App.formatBytes(state.latestCompletedScan.total_bytes || 0);
+    } else if (state.currentScan?.progress) {
+      folderSize = App.formatBytes(state.currentScan.progress.scanned_bytes || 0);
     }
 
     els.summaryPath.textContent = activePath;
     els.summaryPath.title = activePath;
-    els.summarySize.textContent = size;
+    els.summarySize.textContent = folderSize;
+    els.summaryShown.textContent = shownSize;
     els.summaryItems.textContent = itemText;
     els.summaryScan.textContent = App.buildScanSummaryText(state.currentScan || state.latestCompletedScan);
   }
@@ -244,6 +273,11 @@
     els.clearFiltersButton.hidden = !filtersAreActive();
   }
 
+  function renderGoUpState() {
+    const canGoUp = Boolean(state.config?.analyze_root && state.currentPath && state.currentPath !== state.config.analyze_root);
+    els.goUpButton.disabled = !canGoUp || state.pathLoading;
+  }
+
   function renderBreadcrumb() {
     if (!state.config?.analyze_root) {
       App.clearChildren(els.breadcrumb);
@@ -257,41 +291,68 @@
     App.renderBreadcrumb(els.breadcrumb, parts, navigateToPath);
   }
 
+  function renderSelectedCard() {
+    const selected = state.activeItem || buildFallbackSelection();
+    if (!selected) {
+      els.selectedCard.hidden = true;
+      return;
+    }
+
+    const isSynthetic = Boolean(selected.synthetic);
+    const isFolder = selected.type === "dir";
+    const isCurrentFolder = selected.path && selected.path === state.currentView?.path;
+
+    els.selectedCard.hidden = false;
+    els.selectedTitle.textContent = selected.name || "Current folder";
+    els.selectedMeta.textContent = buildSelectedMeta(selected);
+    els.selectedPath.textContent = selected.path ? App.shortPath(selected.path) : "Grouped items in the current view";
+    els.selectedPath.title = selected.path || "Grouped items in the current view";
+
+    const canOpen = isFolder && !isSynthetic && !isCurrentFolder;
+    els.selectedAction.hidden = !canOpen;
+    els.selectedAction.disabled = !canOpen;
+    els.selectedAction.textContent = "Open folder";
+  }
+
   function renderDetailList() {
     App.clearChildren(els.detailList);
 
     if (state.pathLoading) {
-      els.detailTitle.textContent = "Largest items";
-      els.detailSummary.textContent = "Loading items...";
+      els.detailTitle.textContent = "Items in this folder";
+      els.detailSummary.textContent = "Loading direct contents...";
       els.detailEmpty.hidden = false;
-      els.detailEmpty.textContent = "Fetching items for this folder.";
-      els.inspectorMeta.textContent = `Loading items from ${App.basename(state.currentPath) || state.currentPath}`;
+      els.detailEmpty.textContent = "Fetching folders and files for this path.";
+      els.inspectorMeta.textContent = `Loading ${App.basename(state.currentPath) || state.currentPath}`;
       return;
     }
 
     if (!state.currentView) {
-      els.detailTitle.textContent = "Largest items";
+      els.detailTitle.textContent = "Items in this folder";
       els.detailSummary.textContent = App.isScanActive(state.currentScan) ? "Scan in progress." : "No scan data yet.";
       els.detailEmpty.hidden = false;
       els.detailEmpty.textContent = App.isScanActive(state.currentScan)
-        ? "The ranked item list will appear after the first completed scan."
+        ? "Direct folder contents appear after the first completed scan."
         : "Run a scan to inspect folders and files.";
-      els.inspectorMeta.textContent = "Largest items in the current view.";
+      els.inspectorMeta.textContent = "Current folder inventory.";
       return;
     }
 
-    els.detailTitle.textContent = state.currentView.detailTitle;
-    els.detailSummary.textContent = state.currentView.detailSummary;
-    els.inspectorMeta.textContent = state.currentView.inspectorMeta;
+    els.detailTitle.textContent = "Items in this folder";
+    els.detailSummary.textContent = buildDetailSummary(state.currentView.summary);
+    els.inspectorMeta.textContent = buildInspectorMeta(state.currentView.summary, state.currentView.path);
 
-    if (!state.currentView.detailItems.length) {
+    if (!state.currentView.items.length) {
       els.detailEmpty.hidden = false;
-      els.detailEmpty.textContent = state.currentView.emptyDetailMessage;
+      els.detailEmpty.textContent = buildEmptyItemsMessage();
       return;
     }
 
     els.detailEmpty.hidden = true;
-    App.renderLargestItems(els.detailList, state.currentView.detailItems, navigateToPath);
+    App.renderItemList(els.detailList, state.currentView.items, {
+      activePath: state.activeItem?.path || "",
+      onFocus: selectItem,
+      onNavigate: navigateToPath,
+    });
   }
 
   function renderChartArea() {
@@ -303,8 +364,11 @@
     }
 
     if (state.currentView) {
-      if (!state.currentView.chartItems.length) {
-        showChartMessage(state.currentView.emptyChartMessage);
+      els.resultNote.textContent = buildResultNote(state.currentView.summary);
+
+      const hasTreemapData = Array.isArray(state.currentView.treemap?.children) && state.currentView.treemap.children.length > 0;
+      if (!hasTreemapData) {
+        showChartMessage(buildEmptyChartMessage());
         return;
       }
 
@@ -312,9 +376,15 @@
       els.chartEmpty.hidden = true;
       els.chartMessage.hidden = true;
       els.chart.hidden = false;
-      App.renderTreemap(els.chart, els.tooltip, state.currentView, navigateToPath);
+      App.renderTreemap(els.chart, els.tooltip, state.currentView.treemap, {
+        activePath: state.activeItem?.path || "",
+        onFocus: selectItem,
+        onNavigate: navigateToPath,
+      });
       return;
     }
+
+    els.resultNote.textContent = "Run a scan to load the first interactive treemap.";
 
     if (App.isScanActive(state.currentScan)) {
       showEmptyState(
@@ -336,7 +406,7 @@
 
     showEmptyState(
       "Run a scan to map this folder",
-      "Scan the configured root path to build a treemap and inspect the current scan in context.",
+      "Scan the configured root path to build a clickable treemap of the current folder contents.",
       true,
     );
   }
@@ -368,6 +438,7 @@
     }
 
     clearPolling();
+    abortViewLoad();
     state.alert = null;
     state.currentScan = {
       id: state.currentScan?.id ?? null,
@@ -417,6 +488,7 @@
         state.currentScan = selected;
       }
       state.currentView = null;
+      state.activeItem = null;
       renderAll();
       syncUrlState();
       if (App.isScanActive(selected)) {
@@ -457,7 +529,7 @@
           App.logScanWarnings(scan);
           state.latestCompletedScan = scan;
           state.viewedScanId = scan.id;
-          state.currentPath = state.config?.analyze_root || state.currentPath;
+          state.currentPath = state.currentView?.path || state.config?.analyze_root || state.currentPath;
           await loadPath(state.currentPath);
           return;
         }
@@ -500,66 +572,79 @@
       return;
     }
 
+    abortViewLoad();
+
     state.currentPath = path;
     state.pathLoading = true;
     state.alert = null;
     renderAll();
 
+    const controller = new AbortController();
+    state.viewAbortController = controller;
+
     try {
       const query = new URLSearchParams({
         path,
-        limit: "150",
+        limit: String(state.config?.max_children_per_query || 500),
         q: state.filters.q,
         type: state.filters.type,
         min_size: String(state.filters.minSize),
         sort: state.filters.sort,
       });
 
-      const [children, largest] = await Promise.all([
-        App.apiGet(`/api/v1/scans/${state.viewedScanId}/children?${query.toString()}`),
-        App.apiGet(`/api/v1/scans/${state.viewedScanId}/largest?${query.toString()}`),
-      ]);
+      const response = await App.apiGet(`/api/v1/scans/${state.viewedScanId}/explore?${query.toString()}`, {
+        signal: controller.signal,
+      });
 
-      state.currentView = buildNormalView(children, largest.items || []);
-      state.currentPath = children.path;
+      if (state.viewAbortController !== controller) {
+        return;
+      }
+
+      state.currentView = response;
+      state.currentPath = response.path;
+      state.activeItem = chooseNextActiveItem(response, state.activeItem?.path);
       state.pathLoading = false;
       renderAll();
       syncUrlState();
     } catch (err) {
+      if (err.name === "AbortError") {
+        return;
+      }
       state.pathLoading = false;
       renderAll();
       throw err;
+    } finally {
+      if (state.viewAbortController === controller) {
+        state.viewAbortController = null;
+      }
     }
   }
 
-  function buildNormalView(children, largestItems) {
-    const chartItems = (children.children || []).map((item) => ({
-      name: item.name,
-      path: item.path,
-      type: item.type,
-      visualValue: Math.max(item.size_bytes || 0, 1),
-      colorClass: item.type === "dir" ? "dir" : "file",
-      clickable: item.type === "dir",
-      metaLabel: App.formatBytes(item.size_bytes || 0),
-      tooltip: [
-        `<strong>${App.escapeHtml(item.name)}</strong>`,
-        App.escapeHtml(App.shortPath(item.path)),
-        `${App.formatBytes(item.size_bytes || 0)} (${App.formatPercent(item.size_bytes || 0, children.total_bytes || 0)})`,
-        App.escapeHtml(item.type),
-      ].join("<br>"),
-    }));
+  function chooseNextActiveItem(view, preferredPath) {
+    if (!view) {
+      return null;
+    }
+    if (preferredPath) {
+      const match = (view.items || []).find((item) => item.path === preferredPath);
+      if (match) {
+        return match;
+      }
+    }
+    if (view.items?.length) {
+      return view.items[0];
+    }
+    return buildFallbackSelection(view);
+  }
 
+  function buildFallbackSelection(view = state.currentView) {
+    if (!view) {
+      return null;
+    }
     return {
-      path: children.path,
-      totalBytes: children.total_bytes || 0,
-      itemCount: (children.children || []).length,
-      chartItems,
-      emptyChartMessage: "No child items at this path for current filters.",
-      detailTitle: "Largest items",
-      detailSummary: `${largestItems.length} entries ranked by size`,
-      emptyDetailMessage: "No items match the current filters.",
-      detailItems: largestItems,
-      inspectorMeta: `${largestItems.length} largest items from ${App.basename(children.path) || children.path}`,
+      name: App.basename(view.path) || view.path,
+      path: view.path,
+      type: "dir",
+      size_bytes: view.summary?.total_bytes || 0,
     };
   }
 
@@ -606,8 +691,31 @@
     );
   }
 
+  function selectItem(item) {
+    if (!item) {
+      return;
+    }
+    state.activeItem = item;
+    renderSelectedCard();
+    renderDetailList();
+    scheduleTreemapRender();
+  }
+
   function navigateToPath(path, label) {
     loadPath(path).catch((err) => showAlert(`Could not open ${label || App.basename(path)}: ${err.message}`));
+  }
+
+  function navigateToParent() {
+    if (!state.config?.analyze_root || !state.currentPath || state.currentPath === state.config.analyze_root) {
+      return;
+    }
+
+    const parts = App.buildBreadcrumb(state.config.analyze_root, state.currentPath);
+    if (parts.length < 2) {
+      return;
+    }
+    const parent = parts[parts.length - 2];
+    navigateToPath(parent.path, parent.label);
   }
 
   function scheduleTreemapRender() {
@@ -618,9 +726,70 @@
     clearTimeout(state.resizeHandle);
     state.resizeHandle = window.setTimeout(() => {
       if (state.currentView && !state.pathLoading) {
-        App.renderTreemap(els.chart, els.tooltip, state.currentView, navigateToPath);
+        App.renderTreemap(els.chart, els.tooltip, state.currentView.treemap, {
+          activePath: state.activeItem?.path || "",
+          onFocus: selectItem,
+          onNavigate: navigateToPath,
+        });
       }
     }, 120);
+  }
+
+  function buildDetailSummary(summary) {
+    const sortLabel = App.sortOptions.find((option) => option.value === state.filters.sort)?.label || "Largest first";
+    const items = App.formatCount(summary.matching_item_count || 0);
+    const dirs = App.formatCount(summary.visible_dir_count || 0);
+    const files = App.formatCount(summary.visible_file_count || 0);
+    const base = `${items} matching items • ${dirs} folders • ${files} files • ${sortLabel}`;
+
+    if (!summary.is_result_truncated) {
+      return base;
+    }
+
+    return `${base} • showing ${App.formatCount(summary.returned_item_count || 0)} rows`;
+  }
+
+  function buildInspectorMeta(summary, path) {
+    const shown = App.formatBytes(summary.visible_bytes || 0);
+    const total = App.formatBytes(summary.total_bytes || 0);
+    return `Direct contents of ${App.basename(path) || path} • ${shown} in view of ${total}`;
+  }
+
+  function buildSelectedMeta(item) {
+    if (item.synthetic) {
+      return `${App.formatCount(item.hidden_item_count || 0)} grouped items • ${App.formatBytes(item.size_bytes || 0)}`;
+    }
+    const typeLabel = item.type === "dir" ? "Folder" : "File";
+    return `${typeLabel} • ${App.formatBytes(item.size_bytes || 0)}`;
+  }
+
+  function buildResultNote(summary) {
+    const shown = App.formatCount(summary.returned_item_count || 0);
+    const matching = App.formatCount(summary.matching_item_count || 0);
+    const visibleBytes = App.formatBytes(summary.visible_bytes || 0);
+    const totalBytes = App.formatBytes(summary.total_bytes || 0);
+
+    if (summary.has_active_filters) {
+      return `Filtered view: ${matching} matching items, ${visibleBytes} represented in the treemap.`;
+    }
+    if (summary.is_result_truncated) {
+      return `Showing ${shown} of ${matching} direct items. Refine the filters to isolate smaller entries faster.`;
+    }
+    return `Showing the full folder inventory: ${matching} direct items, ${totalBytes} total.`;
+  }
+
+  function buildEmptyItemsMessage() {
+    if (filtersAreActive()) {
+      return "No folders or files match the current filters at this path.";
+    }
+    return "This folder has no direct files or subfolders.";
+  }
+
+  function buildEmptyChartMessage() {
+    if (filtersAreActive()) {
+      return "No treemap tiles match the current filters at this path.";
+    }
+    return "This folder has no direct files or subfolders to visualize.";
   }
 
   function showAlert(message, retry = false) {
@@ -651,5 +820,13 @@
     }
     clearTimeout(state.pollingHandle);
     state.pollingHandle = null;
+  }
+
+  function abortViewLoad() {
+    if (!state.viewAbortController) {
+      return;
+    }
+    state.viewAbortController.abort();
+    state.viewAbortController = null;
   }
 })();

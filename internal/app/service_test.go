@@ -440,6 +440,77 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 	}
 }
 
+func TestGetExploreReturnsCompactTreeAndHiddenBucket(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	dirPath := filepath.Join(root, "docs")
+	scanID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 101, MtimeUnix: 1},
+		{Path: filepath.Join(root, "video.mkv"), ParentPath: root, Name: "video.mkv", Kind: "file", SizeBytes: 60, MtimeUnix: 1},
+		{Path: dirPath, ParentPath: root, Name: "docs", Kind: "dir", SizeBytes: 40, MtimeUnix: 1},
+		{Path: filepath.Join(root, "tiny.txt"), ParentPath: root, Name: "tiny.txt", Kind: "file", SizeBytes: 1, MtimeUnix: 1},
+		{Path: filepath.Join(dirPath, "chapter-1.md"), ParentPath: dirPath, Name: "chapter-1.md", Kind: "file", SizeBytes: 25, MtimeUnix: 1},
+		{Path: filepath.Join(dirPath, "chapter-2.md"), ParentPath: dirPath, Name: "chapter-2.md", Kind: "file", SizeBytes: 15, MtimeUnix: 1},
+	})
+
+	svc := NewService(cfg, st)
+
+	explore, err := svc.GetExplore(context.Background(), scanID, root, NodeQueryOptions{
+		Limit: 2,
+		Sort:  "size_desc",
+	})
+	if err != nil {
+		t.Fatalf("get explore: %v", err)
+	}
+
+	if len(explore.Items) != 2 {
+		t.Fatalf("expected 2 visible items, got %d", len(explore.Items))
+	}
+	if explore.Summary.HiddenItemCount != 1 {
+		t.Fatalf("expected 1 hidden item, got %d", explore.Summary.HiddenItemCount)
+	}
+	if !explore.Summary.IsResultTruncated {
+		t.Fatalf("expected truncated summary")
+	}
+	if len(explore.Treemap.Children) != 3 {
+		t.Fatalf("expected 3 root treemap children, got %d", len(explore.Treemap.Children))
+	}
+
+	var docs *ExploreTreemapNode
+	var hidden *ExploreTreemapNode
+	for i := range explore.Treemap.Children {
+		node := &explore.Treemap.Children[i]
+		if node.Path == dirPath {
+			docs = node
+		}
+		if node.Synthetic {
+			hidden = node
+		}
+	}
+
+	if docs == nil {
+		t.Fatalf("expected docs node in treemap")
+	}
+	if len(docs.Children) != 2 {
+		t.Fatalf("expected docs to expand into 2 children, got %d", len(docs.Children))
+	}
+	if hidden == nil || hidden.HiddenItemCount != 1 {
+		t.Fatalf("expected hidden bucket in root treemap, got %+v", hidden)
+	}
+}
+
 func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
 	_, err := normalizeNodeQueryOptions(NodeQueryOptions{Kind: "wat"}, 10, "size_desc")
 	if err == nil {

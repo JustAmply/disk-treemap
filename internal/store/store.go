@@ -61,6 +61,11 @@ type NodeQueryOptions struct {
 	Sort    string
 }
 
+type ChildAggregate struct {
+	Count      int64
+	TotalBytes int64
+}
+
 type NodeWriter struct {
 	tx *sql.Tx
 }
@@ -379,6 +384,25 @@ func (s *Store) GetNode(ctx context.Context, scanID int64, path string) (Node, e
 
 func (s *Store) ListChildren(ctx context.Context, scanID int64, parentPath string, limit int) ([]Node, error) {
 	return s.ListChildrenWithOptions(ctx, scanID, parentPath, NodeQueryOptions{Limit: limit, Sort: "size_desc"})
+}
+
+func (s *Store) AggregateChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) (ChildAggregate, error) {
+	query := strings.Builder{}
+	query.WriteString(`
+		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+		FROM nodes
+		WHERE scan_id=? AND parent_path=?
+	`)
+
+	args := []any{scanID, parentPath}
+	appendNodeFilters(&query, &args, opts)
+
+	var agg ChildAggregate
+	if err := s.db.QueryRowContext(ctx, query.String(), args...).Scan(&agg.Count, &agg.TotalBytes); err != nil {
+		return ChildAggregate{}, fmt.Errorf("aggregate children: %w", err)
+	}
+
+	return agg, nil
 }
 
 func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) ([]Node, error) {
