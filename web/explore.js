@@ -39,6 +39,7 @@
     selectedAction: document.getElementById("selectedAction"),
     detailTitle: document.getElementById("detailTitle"),
     detailSummary: document.getElementById("detailSummary"),
+    detailScroll: document.getElementById("detailScroll"),
     detailList: document.getElementById("detailList"),
     detailEmpty: document.getElementById("detailEmpty"),
     tooltip: document.getElementById("tooltip"),
@@ -65,6 +66,7 @@
     resizeHandle: null,
     resizeObserver: null,
     viewAbortController: null,
+    detailScrollTop: 0,
     filters: { ...defaultFilters },
     urlState: App.readExploreUrlState(),
   };
@@ -147,6 +149,10 @@
       if (state.activeItem?.type === "dir" && state.activeItem.path) {
         navigateToPath(state.activeItem.path, state.activeItem.name);
       }
+    });
+    els.detailList.addEventListener("scroll", () => {
+      state.detailScrollTop = els.detailList.scrollTop;
+      syncDetailScrollState();
     });
     window.addEventListener("resize", scheduleTreemapRender);
   }
@@ -323,6 +329,7 @@
       els.detailEmpty.hidden = false;
       els.detailEmpty.textContent = "Fetching folders and files for this path.";
       els.inspectorMeta.textContent = `Loading ${App.basename(state.currentPath) || state.currentPath}`;
+      scheduleDetailScrollSync();
       return;
     }
 
@@ -334,6 +341,7 @@
         ? "Direct folder contents appear after the first completed scan."
         : "Run a scan to inspect folders and files.";
       els.inspectorMeta.textContent = "Current folder inventory.";
+      scheduleDetailScrollSync();
       return;
     }
 
@@ -344,6 +352,7 @@
     if (!state.currentView.items.length) {
       els.detailEmpty.hidden = false;
       els.detailEmpty.textContent = buildEmptyItemsMessage();
+      scheduleDetailScrollSync();
       return;
     }
 
@@ -353,6 +362,7 @@
       onFocus: selectItem,
       onNavigate: navigateToPath,
     });
+    scheduleDetailScrollSync(true);
   }
 
   function renderChartArea() {
@@ -576,6 +586,7 @@
 
     state.currentPath = path;
     state.pathLoading = true;
+    state.detailScrollTop = 0;
     state.alert = null;
     renderAll();
 
@@ -795,6 +806,27 @@
   function showAlert(message, retry = false) {
     state.alert = { message, retry };
     renderAlert();
+  }
+
+  function scheduleDetailScrollSync(restoreScroll = false) {
+    window.requestAnimationFrame(() => {
+      if (restoreScroll) {
+        const maxScroll = Math.max(els.detailList.scrollHeight - els.detailList.clientHeight, 0);
+        els.detailList.scrollTop = Math.min(state.detailScrollTop, maxScroll);
+      }
+      syncDetailScrollState();
+    });
+  }
+
+  function syncDetailScrollState() {
+    const maxScroll = Math.max(els.detailList.scrollHeight - els.detailList.clientHeight, 0);
+    const isScrollable = maxScroll > 6;
+    const atTop = !isScrollable || els.detailList.scrollTop <= 2;
+    const atBottom = !isScrollable || els.detailList.scrollTop >= maxScroll - 2;
+
+    els.detailScroll.dataset.scrollable = isScrollable ? "true" : "false";
+    els.detailScroll.dataset.atTop = atTop ? "true" : "false";
+    els.detailScroll.dataset.atBottom = atBottom ? "true" : "false";
   }
 
   function disableScanButtons(disabled) {

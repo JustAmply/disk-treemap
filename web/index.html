@@ -135,23 +135,25 @@
 
       <aside class="surface inspector">
         <div class="inspector-inner">
-          <div class="panel-header inspector-header">
-            <div>
-              <p class="panel-kicker">Explore</p>
-              <h2>Inspector</h2>
+          <div class="inspector-top">
+            <div class="panel-header inspector-header">
+              <div>
+                <p class="panel-kicker">Explore</p>
+                <h2>Inspector</h2>
+              </div>
+              <p id="inspectorMeta" class="inspector-meta">Current folder inventory.</p>
             </div>
-            <p id="inspectorMeta" class="inspector-meta">Current folder inventory.</p>
+
+            <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
+
+            <section id="selectedCard" class="selected-card" hidden>
+              <p class="panel-kicker">Selection</p>
+              <h3 id="selectedTitle">Current folder</h3>
+              <p id="selectedMeta" class="section-note">Folder</p>
+              <p id="selectedPath" class="selected-path">-</p>
+              <button id="selectedAction" class="ghost-button selected-action" type="button" hidden>Open folder</button>
+            </section>
           </div>
-
-          <nav id="breadcrumb" class="breadcrumb" aria-label="Path"></nav>
-
-          <section id="selectedCard" class="selected-card" hidden>
-            <p class="panel-kicker">Selection</p>
-            <h3 id="selectedTitle">Current folder</h3>
-            <p id="selectedMeta" class="section-note">Folder</p>
-            <p id="selectedPath" class="selected-path">-</p>
-            <button id="selectedAction" class="ghost-button selected-action" type="button" hidden>Open folder</button>
-          </section>
 
           <section class="inspector-section detail-section">
             <div class="section-heading">
@@ -159,8 +161,10 @@
               <p id="detailSummary" class="section-note">No scan data yet.</p>
             </div>
 
-            <div id="detailList" class="item-list" aria-live="polite"></div>
-            <p id="detailEmpty" class="list-empty">Run a scan to inspect folders and files.</p>
+            <div id="detailScroll" class="detail-scroll" data-scrollable="false" data-at-top="true" data-at-bottom="true">
+              <div id="detailList" class="item-list" aria-live="polite"></div>
+              <p id="detailEmpty" class="list-empty">Run a scan to inspect folders and files.</p>
+            </div>
           </section>
         </div>
       </aside>
