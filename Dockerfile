@@ -1,10 +1,26 @@
+# syntax=docker/dockerfile:1.7
+
 # Build stage
-FROM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod ./
-COPY . .
-RUN go mod download \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=mod -trimpath -ldflags="-s -w" -o /out/disk-treemap ./cmd/server \
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+ENV CGO_ENABLED=0 \
+    GOFLAGS=-trimpath
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o /out/disk-treemap ./cmd/server \
     && mkdir -p /out/data
 
 # Runtime stage (root user for broader scan read permissions)
