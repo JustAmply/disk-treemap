@@ -1,23 +1,68 @@
 version: 2
 
+multi-ecosystem-groups:
+  # Bundle infrastructure-related version updates into a single PR.
+  infrastructure:
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Europe/Berlin"
+    commit-message:
+      prefix: "deps(infra)"
+    pull-request-branch-name:
+      separator: "-"
+
 updates:
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "tuesday"
+      time: "08:00"
+      timezone: "Europe/Berlin"
+    open-pull-requests-limit: 2
     commit-message:
-      prefix: "deps"
+      prefix: "deps(go)"
+    pull-request-branch-name:
+      separator: "-"
+    groups:
+      go-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      go-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+      go-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
 
   - package-ecosystem: "docker"
     directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "deps"
+    open-pull-requests-limit: 1
+    patterns:
+      - "*"
+    multi-ecosystem-group: "infrastructure"
+    groups:
+      docker-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "ci"
+    open-pull-requests-limit: 1
+    patterns:
+      - "*"
+    multi-ecosystem-group: "infrastructure"
+    groups:
+      github-actions-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
