@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Detect duplicate push for open PR
         id: detect
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             if (context.eventName !== 'push') {
