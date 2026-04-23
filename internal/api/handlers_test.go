@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,48 @@ import (
 	"github.com/justamply/disk-treemap/internal/config"
 	"github.com/justamply/disk-treemap/internal/store"
 )
+
+func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	indexReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	indexRec := httptest.NewRecorder()
+	mux.ServeHTTP(indexRec, indexReq)
+
+	if indexRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for index, got %d: %s", indexRec.Code, indexRec.Body.String())
+	}
+
+	body := indexRec.Body.String()
+	for _, needle := range []string{
+		`href="/assets/favicon.png"`,
+		`src="/assets/disk-treemap-logo.png"`,
+		`alt="Disk Treemap logo"`,
+	} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("expected index to contain %q", needle)
+		}
+	}
+
+	faviconReq := httptest.NewRequest(http.MethodGet, "/assets/favicon.png", nil)
+	faviconRec := httptest.NewRecorder()
+	mux.ServeHTTP(faviconRec, faviconReq)
+
+	if faviconRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for favicon, got %d", faviconRec.Code)
+	}
+	if got := faviconRec.Header().Get("Content-Type"); !strings.HasPrefix(got, "image/png") {
+		t.Fatalf("expected png content type, got %q", got)
+	}
+}
 
 func TestChildrenRejectsPathOutsideRoot(t *testing.T) {
 	root := t.TempDir()

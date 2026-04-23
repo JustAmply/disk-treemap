@@ -119,6 +119,22 @@ h3 {
   gap: var(--space-3);
 }
 
+.app-brand {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.95rem;
+  flex: 1;
+}
+
+.app-logo {
+  width: clamp(3rem, 4.6vw, 4.25rem);
+  height: clamp(3rem, 4.6vw, 4.25rem);
+  flex-shrink: 0;
+  display: block;
+  filter: drop-shadow(0 14px 28px rgba(18, 32, 50, 0.14));
+}
+
 .app-heading {
   min-width: 0;
   display: grid;
@@ -1031,6 +1047,10 @@ h3 {
     justify-content: space-between;
   }
 
+  .app-brand {
+    width: 100%;
+  }
+
   .view-stats,
   .toolbar-grid {
     grid-template-columns: 1fr;
@@ -1067,6 +1087,10 @@ h3 {
   .header-actions {
     gap: var(--space-2);
     flex-wrap: wrap;
+  }
+
+  .app-brand {
+    align-items: flex-start;
   }
 
   .scan-button,
