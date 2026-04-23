@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"image"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -52,14 +53,18 @@ func TestBrandingAssetsUseRealTransparency(t *testing.T) {
 
 			var transparentPixels int
 			var opaquePixels int
+			var lightFringePixels int
 			for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 				for x := bounds.Min.X; x < bounds.Max.X; x++ {
-					_, _, _, alpha := img.At(x, y).RGBA()
+					red, green, blue, alpha := img.At(x, y).RGBA()
 					switch {
 					case alpha == 0:
 						transparentPixels++
 					case alpha == 0xffff:
 						opaquePixels++
+					}
+					if alpha > 0 && isLightNeutralPixel(red, green, blue) && hasTransparentNeighbor(img, x, y) {
+						lightFringePixels++
 					}
 				}
 			}
@@ -70,8 +75,36 @@ func TestBrandingAssetsUseRealTransparency(t *testing.T) {
 			if opaquePixels == 0 {
 				t.Fatal("expected at least one fully opaque foreground pixel")
 			}
+			if lightFringePixels > 0 {
+				t.Fatalf("expected no light opaque fringe pixels touching transparency, found %d", lightFringePixels)
+			}
 		})
 	}
+}
+
+func isLightNeutralPixel(red, green, blue uint32) bool {
+	minChannel := min(red, green, blue)
+	maxChannel := max(red, green, blue)
+	return minChannel >= 0x9191 && maxChannel-minChannel <= 0x3737
+}
+
+func hasTransparentNeighbor(img image.Image, x, y int) bool {
+	bounds := img.Bounds()
+	for neighborY := y - 1; neighborY <= y+1; neighborY++ {
+		for neighborX := x - 1; neighborX <= x+1; neighborX++ {
+			if neighborX == x && neighborY == y {
+				continue
+			}
+			if neighborX < bounds.Min.X || neighborX >= bounds.Max.X || neighborY < bounds.Min.Y || neighborY >= bounds.Max.Y {
+				continue
+			}
+			_, _, _, alpha := img.At(neighborX, neighborY).RGBA()
+			if alpha == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
