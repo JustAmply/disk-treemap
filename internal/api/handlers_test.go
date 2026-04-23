@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +18,61 @@ import (
 	"github.com/justamply/disk-treemap/internal/config"
 	"github.com/justamply/disk-treemap/internal/store"
 )
+
+func TestBrandingAssetsUseRealTransparency(t *testing.T) {
+	for _, asset := range []string{
+		filepath.Join("..", "..", "web", "assets", "disk-treemap-logo.png"),
+		filepath.Join("..", "..", "web", "assets", "favicon.png"),
+	} {
+		t.Run(filepath.Base(asset), func(t *testing.T) {
+			f, err := os.Open(asset)
+			if err != nil {
+				t.Fatalf("open asset: %v", err)
+			}
+			defer f.Close()
+
+			img, err := png.Decode(f)
+			if err != nil {
+				t.Fatalf("decode png: %v", err)
+			}
+
+			bounds := img.Bounds()
+			corners := [][2]int{
+				{bounds.Min.X, bounds.Min.Y},
+				{bounds.Max.X - 1, bounds.Min.Y},
+				{bounds.Min.X, bounds.Max.Y - 1},
+				{bounds.Max.X - 1, bounds.Max.Y - 1},
+			}
+			for _, corner := range corners {
+				_, _, _, alpha := img.At(corner[0], corner[1]).RGBA()
+				if alpha != 0 {
+					t.Fatalf("expected transparent corner pixel at %v, got alpha %d", corner, alpha)
+				}
+			}
+
+			var transparentPixels int
+			var opaquePixels int
+			for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+				for x := bounds.Min.X; x < bounds.Max.X; x++ {
+					_, _, _, alpha := img.At(x, y).RGBA()
+					switch {
+					case alpha == 0:
+						transparentPixels++
+					case alpha == 0xffff:
+						opaquePixels++
+					}
+				}
+			}
+
+			if transparentPixels == 0 {
+				t.Fatal("expected at least one fully transparent pixel")
+			}
+			if opaquePixels == 0 {
+				t.Fatal("expected at least one fully opaque foreground pixel")
+			}
+		})
+	}
+}
 
 func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
 	root := t.TempDir()
