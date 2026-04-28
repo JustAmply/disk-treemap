@@ -2,7 +2,7 @@ module github.com/justamply/disk-treemap
 
 go 1.26.2
 
-require modernc.org/sqlite v1.49.1
+require modernc.org/sqlite v1.50.0
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
