@@ -263,21 +263,21 @@ func (w *NodeWriter) InsertNodesBatch(ctx context.Context, scanID int64, nodes [
 		return nil
 	}
 
+	for _, node := range nodes {
+		w.idForPath(node.Path)
+	}
+
 	stored := make([]StoredNode, 0, len(nodes))
 	for _, node := range nodes {
-		nodeID, ok := w.pathIDs[node.Path]
-		if !ok {
-			nodeID = w.nextNodeID
-			w.nextNodeID++
-			w.pathIDs[node.Path] = nodeID
-		}
+		nodeID := w.idForPath(node.Path)
 
 		var parentID *int64
 		if node.ParentPath != "" {
-			if id, ok := w.pathIDs[node.ParentPath]; ok {
-				parent := id
-				parentID = &parent
+			parent, ok := w.pathIDs[node.ParentPath]
+			if !ok {
+				return fmt.Errorf("parent path %q is not available for node %q", node.ParentPath, node.Path)
 			}
+			parentID = &parent
 		}
 
 		stored = append(stored, StoredNode{
@@ -291,6 +291,16 @@ func (w *NodeWriter) InsertNodesBatch(ctx context.Context, scanID int64, nodes [
 	}
 
 	return w.InsertStoredNodesBatch(ctx, scanID, stored)
+}
+
+func (w *NodeWriter) idForPath(path string) int64 {
+	if id, ok := w.pathIDs[path]; ok {
+		return id
+	}
+	id := w.nextNodeID
+	w.nextNodeID++
+	w.pathIDs[path] = id
+	return id
 }
 
 func (w *NodeWriter) InsertStoredNodesBatch(ctx context.Context, scanID int64, nodes []StoredNode) error {
@@ -509,7 +519,7 @@ func (s *Store) OptimizeStorage(ctx context.Context, forceVacuum bool) error {
 func (s *Store) GetNode(ctx context.Context, scanID int64, path string) (Node, error) {
 	rootPath, nodeID, err := s.resolveNodeID(ctx, scanID, path)
 	if err != nil {
-		if s.hasLegacy {
+		if s.hasLegacy && errors.Is(err, ErrNotFound) {
 			return s.getLegacyNode(ctx, scanID, path)
 		}
 		return Node{}, err
@@ -531,7 +541,7 @@ func (s *Store) ListChildren(ctx context.Context, scanID int64, parentPath strin
 func (s *Store) AggregateChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) (ChildAggregate, error) {
 	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
-		if s.hasLegacy {
+		if s.hasLegacy && errors.Is(err, ErrNotFound) {
 			return s.aggregateLegacyChildrenWithOptions(ctx, scanID, parentPath, opts)
 		}
 		return ChildAggregate{}, err
@@ -562,7 +572,7 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 
 	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
-		if s.hasLegacy {
+		if s.hasLegacy && errors.Is(err, ErrNotFound) {
 			return s.listLegacyChildrenWithOptions(ctx, scanID, parentPath, opts)
 		}
 		return nil, err
@@ -617,7 +627,7 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 
 	rootPath, baseID, err := s.resolveNodeID(ctx, scanID, basePath)
 	if err != nil {
-		if s.hasLegacy {
+		if s.hasLegacy && errors.Is(err, ErrNotFound) {
 			return s.listLegacyLargestInPathWithOptions(ctx, scanID, basePath, opts)
 		}
 		if errors.Is(err, ErrNotFound) {

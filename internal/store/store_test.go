@@ -199,6 +199,66 @@ func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	}
 }
 
+func TestInsertNodesBatchSupportsChildBeforeParent(t *testing.T) {
+	st := newTestStore(t)
+
+	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create scan: %v", err)
+	}
+
+	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+
+	filePath := filepath.Join("/scanroot", "dir", "file.bin")
+	dirPath := filepath.Join("/scanroot", "dir")
+	nodes := []Node{
+		{Path: filePath, ParentPath: dirPath, Name: "file.bin", Kind: "file", SizeBytes: 10},
+		{Path: dirPath, ParentPath: "/scanroot", Name: "dir", Kind: "dir", SizeBytes: 10},
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
+	}
+
+	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
+		_ = writer.Rollback()
+		t.Fatalf("insert out-of-order nodes: %v", err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	file, err := st.GetNode(context.Background(), scanID, filePath)
+	if err != nil {
+		t.Fatalf("get out-of-order file: %v", err)
+	}
+	if file.ParentPath != dirPath || file.Name != "file.bin" {
+		t.Fatalf("unexpected file node: %+v", file)
+	}
+}
+
+func TestInsertNodesBatchRejectsMissingParent(t *testing.T) {
+	st := newTestStore(t)
+
+	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create scan: %v", err)
+	}
+
+	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer writer.Rollback()
+
+	err = writer.InsertNodesBatch(context.Background(), scanID, []Node{
+		{Path: filepath.Join("/scanroot", "orphan.bin"), ParentPath: "/scanroot", Name: "orphan.bin", Kind: "file", SizeBytes: 10},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent path") {
+		t.Fatalf("expected missing parent error, got %v", err)
+	}
+}
+
 func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	st := newTestStore(t)
 
@@ -213,7 +273,7 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	}
 
 	total := maxNodeRowsPerInsert + 10
-	nodes := make([]Node, 0, total)
+	nodes := []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 0}}
 	for i := 0; i < total; i++ {
 		nodes = append(nodes, Node{
 			Path:       fmt.Sprintf("/scanroot/file-%d.bin", i),
@@ -237,8 +297,8 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	if err := st.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM nodes WHERE scan_id=?`, scanID).Scan(&count); err != nil {
 		t.Fatalf("count nodes: %v", err)
 	}
-	if count != total {
-		t.Fatalf("expected %d nodes, got %d", total, count)
+	if count != len(nodes) {
+		t.Fatalf("expected %d nodes, got %d", len(nodes), count)
 	}
 }
 
