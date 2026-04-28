@@ -52,9 +52,11 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return Result{}, errors.New("node callback is required")
 	}
 
-	var sem chan struct{}
+	var dirSem chan struct{}
+	var fileSem chan struct{}
 	if s.maxConcurrency > 1 {
-		sem = make(chan struct{}, s.maxConcurrency-1)
+		dirSem = make(chan struct{}, s.maxConcurrency-1)
+		fileSem = make(chan struct{}, s.maxConcurrency)
 	}
 
 	var nextNodeID int64
@@ -62,7 +64,7 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return atomic.AddInt64(&nextNodeID, 1)
 	}
 
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, sem, allocNodeID, cb)
+	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, nil, dirSem, fileSem, allocNodeID, cb)
 	if err != nil {
 		return Result{}, err
 	}
@@ -80,7 +82,9 @@ func (s *Scanner) scanNode(
 	parentID int64,
 	hasParent bool,
 	entry fs.DirEntry,
-	sem chan struct{},
+	knownInfo fs.FileInfo,
+	dirSem chan struct{},
+	fileSem chan struct{},
 	allocNodeID func() int64,
 	emit NodeCallback,
 ) (int64, int64, int64, error) {
@@ -90,7 +94,9 @@ func (s *Scanner) scanNode(
 
 	var info fs.FileInfo
 	var err error
-	if entry != nil {
+	if knownInfo != nil {
+		info = knownInfo
+	} else if entry != nil {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return 0, 0, 0, nil
 		}
@@ -174,10 +180,57 @@ func (s *Scanner) scanNode(
 		childPath := filepath.Join(path, entry.Name())
 		childEntry := entry
 
-		spawned := false
-		if sem != nil {
+		if childEntry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+
+		if fileSem != nil && !childEntry.IsDir() {
 			select {
-			case sem <- struct{}{}:
+			case fileSem <- struct{}{}:
+			case <-ctx.Done():
+				apply(0, 0, 0, ctx.Err())
+				continue
+			}
+
+			wg.Add(1)
+			go func(p string, e fs.DirEntry) {
+				defer wg.Done()
+
+				info, infoErr := e.Info()
+				if infoErr != nil {
+					<-fileSem
+					if isNonFatal(infoErr) {
+						log.Printf("scan warning: lstat %q: %v", p, infoErr)
+						apply(0, 0, 1, nil)
+						return
+					}
+					apply(0, 0, 0, fmt.Errorf("lstat %q: %w", p, infoErr))
+					return
+				}
+
+				if info.Mode()&os.ModeSymlink != 0 {
+					<-fileSem
+					return
+				}
+
+				if info.IsDir() {
+					<-fileSem
+					sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirSem, fileSem, allocNodeID, emit)
+					apply(sz, n, w, childErr)
+					return
+				}
+
+				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirSem, fileSem, allocNodeID, emit)
+				<-fileSem
+				apply(sz, n, w, childErr)
+			}(childPath, childEntry)
+			continue
+		}
+
+		spawned := false
+		if dirSem != nil {
+			select {
+			case dirSem <- struct{}{}:
 				spawned = true
 			default:
 			}
@@ -187,14 +240,14 @@ func (s *Scanner) scanNode(
 			wg.Add(1)
 			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
-				defer func() { <-sem }()
-				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, sem, allocNodeID, emit)
+				defer func() { <-dirSem }()
+				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, nil, dirSem, fileSem, allocNodeID, emit)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
 		}
 
-		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, sem, allocNodeID, emit)
+		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, nil, dirSem, fileSem, allocNodeID, emit)
 		apply(sz, n, w, childErr)
 	}
 

@@ -119,8 +119,8 @@ Notes:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCAN_MAX_CONCURRENCY` | `4` | Number of concurrent directory workers during a scan |
-| `SCAN_WRITE_BATCH_SIZE` | `512` | Batch size used when writing scan results to storage |
+| `SCAN_MAX_CONCURRENCY` | `4` | Number of concurrent filesystem workers during a scan |
+| `SCAN_WRITE_BATCH_SIZE` | `2048` | Batch size used when writing scan results to storage |
 | `SCAN_PROGRESS_INTERVAL_MS` | `200` | How often progress updates are emitted while a scan runs |
 
 </details>
@@ -141,6 +141,7 @@ Notes:
 ### A scan takes too long
 
 - Large trees can take time with a filesystem walk
+- For trees with many small files, try increasing `SCAN_MAX_CONCURRENCY`; for very high item counts, `SCAN_WRITE_BATCH_SIZE` can also help
 - Narrow the root path if you only care about one subtree
 - Set `SCAN_TIMEOUT` if you want long scans to stop automatically
 

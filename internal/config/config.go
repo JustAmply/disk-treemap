@@ -14,7 +14,7 @@ const (
 	defaultListenAddr          = ":8080"
 	defaultDataDir             = "/data"
 	defaultScanMaxConcurrency  = 4
-	defaultScanWriteBatchSize  = 512
+	defaultScanWriteBatchSize  = 2048
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500
