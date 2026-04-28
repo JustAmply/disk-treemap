@@ -521,7 +521,7 @@ func (s *Store) GetNode(ctx context.Context, scanID int64, path string) (Node, e
 	}
 
 	cleanPath := filepath.Clean(path)
-	return compactRowToNode(rootPath, cleanPath, compactParentPath(rootPath, cleanPath), row), nil
+	return compactRowToNode(cleanPath, compactParentPath(rootPath, cleanPath), row), nil
 }
 
 func (s *Store) ListChildren(ctx context.Context, scanID int64, parentPath string, limit int) ([]Node, error) {
@@ -560,7 +560,7 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 		opts.Limit = 500
 	}
 
-	rootPath, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
+	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
 		if s.hasLegacy {
 			return s.listLegacyChildrenWithOptions(ctx, scanID, parentPath, opts)
@@ -598,7 +598,7 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 			return nil, fmt.Errorf("scan child row: %w", err)
 		}
 		childPath := filepath.Join(cleanParentPath, row.Name)
-		items = append(items, compactRowToNode(rootPath, childPath, cleanParentPath, row))
+		items = append(items, compactRowToNode(childPath, cleanParentPath, row))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate children: %w", err)
@@ -619,6 +619,9 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 	if err != nil {
 		if s.hasLegacy {
 			return s.listLegacyLargestInPathWithOptions(ctx, scanID, basePath, opts)
+		}
+		if errors.Is(err, ErrNotFound) {
+			return []Node{}, nil
 		}
 		return nil, err
 	}
@@ -667,7 +670,7 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 			return nil, fmt.Errorf("scan largest row: %w", err)
 		}
 		path := filepath.Join(rootPath, relPath)
-		items = append(items, compactRowToNode(rootPath, path, compactParentPath(rootPath, path), row))
+		items = append(items, compactRowToNode(path, compactParentPath(rootPath, path), row))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate largest rows: %w", err)
@@ -774,8 +777,7 @@ func scanCompactNodeRowWithRelPath(rows *sql.Rows) (compactNodeRow, string, erro
 	return row, relPath, err
 }
 
-func compactRowToNode(rootPath, path, parentPath string, row compactNodeRow) Node {
-	_ = rootPath
+func compactRowToNode(path, parentPath string, row compactNodeRow) Node {
 	return Node{
 		Path:       filepath.Clean(path),
 		ParentPath: parentPath,

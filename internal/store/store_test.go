@@ -145,6 +145,24 @@ func TestListLargestInPathFindsDeepDescendants(t *testing.T) {
 	}
 }
 
+func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
+	st := newTestStore(t)
+	root := "/scanroot"
+
+	scanID := insertCompletedScan(t, st, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 10},
+		{Path: filepath.Join(root, "file.bin"), ParentPath: root, Name: "file.bin", Kind: "file", SizeBytes: 10},
+	})
+
+	items, err := st.ListLargestInPath(context.Background(), scanID, filepath.Join(root, "missing"), 10)
+	if err != nil {
+		t.Fatalf("list largest missing base: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no items for missing base path, got %+v", items)
+	}
+}
+
 func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	st := newTestStore(t)
 

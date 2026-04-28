@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,8 +125,11 @@ func TestScannerEmitsNodeAndParentIDs(t *testing.T) {
 	writeSizedFile(t, file, 10)
 
 	s := New(root, 2)
+	var mu sync.Mutex
 	nodes := make(map[string]NodeRecord)
 	_, err := s.Scan(context.Background(), func(node NodeRecord) error {
+		mu.Lock()
+		defer mu.Unlock()
 		nodes[node.Path] = node
 		return nil
 	})

@@ -16,6 +16,7 @@ import (
 
 const (
 	minProgressInterval         = 10 * time.Millisecond
+	storageOptimizeTimeout      = 30 * time.Second
 	exploreExpandedDirLimit     = 12
 	exploreBranchLimit          = 14
 	exploreTreemapNodeBudget    = 240
@@ -195,23 +196,24 @@ func (s *Service) runScan(scanID int64) {
 	var fallbackMu sync.Mutex
 	var fallbackNextID int64
 	fallbackPathIDs := map[string]int64{}
+	fallbackIDForPath := func(path string) int64 {
+		if id, ok := fallbackPathIDs[path]; ok {
+			return id
+		}
+		fallbackNextID++
+		id := fallbackNextID
+		fallbackPathIDs[path] = id
+		return id
+	}
 	toStoredNode := func(node scan.NodeRecord) store.StoredNode {
 		nodeID := node.NodeID
 		parentID := node.ParentID
 		if nodeID == 0 {
 			fallbackMu.Lock()
-			if existingID, ok := fallbackPathIDs[node.Path]; ok {
-				nodeID = existingID
-			} else {
-				fallbackNextID++
-				nodeID = fallbackNextID
-				fallbackPathIDs[node.Path] = nodeID
-			}
+			nodeID = fallbackIDForPath(node.Path)
 			if parentID == nil && node.ParentPath != "" {
-				if id, ok := fallbackPathIDs[node.ParentPath]; ok {
-					parent := id
-					parentID = &parent
-				}
+				parent := fallbackIDForPath(node.ParentPath)
+				parentID = &parent
 			}
 			fallbackMu.Unlock()
 		}
@@ -274,7 +276,9 @@ func (s *Service) runScan(scanID int64) {
 
 	s.clearRunning(scanID)
 	s.pruneOperationalScans(scanID)
-	if err := s.store.OptimizeStorage(context.Background(), true); err != nil {
+	optimizeCtx, optimizeCancel := context.WithTimeout(context.Background(), storageOptimizeTimeout)
+	defer optimizeCancel()
+	if err := s.store.OptimizeStorage(optimizeCtx, false); err != nil {
 		log.Printf("scan #%d storage optimize warning: %v", scanID, err)
 	}
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
