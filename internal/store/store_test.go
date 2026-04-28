@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -94,6 +96,73 @@ func TestAggregateChildrenWithOptions(t *testing.T) {
 	}
 }
 
+func TestGetNodeResolvesDeepCompactPath(t *testing.T) {
+	st := newTestStore(t)
+	root := "/scanroot"
+	dirPath := filepath.Join(root, "a", "b")
+	filePath := filepath.Join(dirPath, "payload.bin")
+
+	scanID := insertCompletedScan(t, st, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 25},
+		{Path: filepath.Join(root, "a"), ParentPath: root, Name: "a", Kind: "dir", SizeBytes: 25},
+		{Path: dirPath, ParentPath: filepath.Join(root, "a"), Name: "b", Kind: "dir", SizeBytes: 25},
+		{Path: filePath, ParentPath: dirPath, Name: "payload.bin", Kind: "file", SizeBytes: 25},
+	})
+
+	node, err := st.GetNode(context.Background(), scanID, filePath)
+	if err != nil {
+		t.Fatalf("get deep node: %v", err)
+	}
+	if node.Path != filePath || node.ParentPath != dirPath || node.Name != "payload.bin" || node.Kind != "file" {
+		t.Fatalf("unexpected deep node: %+v", node)
+	}
+}
+
+func TestListLargestInPathFindsDeepDescendants(t *testing.T) {
+	st := newTestStore(t)
+	root := "/scanroot"
+	dirPath := filepath.Join(root, "media", "nested")
+	largeFile := filepath.Join(dirPath, "large.bin")
+	smallFile := filepath.Join(root, "small.bin")
+
+	scanID := insertCompletedScan(t, st, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 110},
+		{Path: filepath.Join(root, "media"), ParentPath: root, Name: "media", Kind: "dir", SizeBytes: 100},
+		{Path: dirPath, ParentPath: filepath.Join(root, "media"), Name: "nested", Kind: "dir", SizeBytes: 100},
+		{Path: largeFile, ParentPath: dirPath, Name: "large.bin", Kind: "file", SizeBytes: 100},
+		{Path: smallFile, ParentPath: root, Name: "small.bin", Kind: "file", SizeBytes: 10},
+	})
+
+	items, err := st.ListLargestInPathWithOptions(context.Background(), scanID, filepath.Join(root, "media"), NodeQueryOptions{
+		Limit: 10,
+		Kind:  "file",
+	})
+	if err != nil {
+		t.Fatalf("list largest deep descendants: %v", err)
+	}
+	if len(items) != 1 || items[0].Path != largeFile || items[0].ParentPath != dirPath {
+		t.Fatalf("unexpected largest descendants: %+v", items)
+	}
+}
+
+func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
+	st := newTestStore(t)
+	root := "/scanroot"
+
+	scanID := insertCompletedScan(t, st, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 10},
+		{Path: filepath.Join(root, "file.bin"), ParentPath: root, Name: "file.bin", Kind: "file", SizeBytes: 10},
+	})
+
+	items, err := st.ListLargestInPath(context.Background(), scanID, filepath.Join(root, "missing"), 10)
+	if err != nil {
+		t.Fatalf("list largest missing base: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("expected no items for missing base path, got %+v", items)
+	}
+}
+
 func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	st := newTestStore(t)
 
@@ -130,6 +199,66 @@ func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	}
 }
 
+func TestInsertNodesBatchSupportsChildBeforeParent(t *testing.T) {
+	st := newTestStore(t)
+
+	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create scan: %v", err)
+	}
+
+	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+
+	filePath := filepath.Join("/scanroot", "dir", "file.bin")
+	dirPath := filepath.Join("/scanroot", "dir")
+	nodes := []Node{
+		{Path: filePath, ParentPath: dirPath, Name: "file.bin", Kind: "file", SizeBytes: 10},
+		{Path: dirPath, ParentPath: "/scanroot", Name: "dir", Kind: "dir", SizeBytes: 10},
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
+	}
+
+	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
+		_ = writer.Rollback()
+		t.Fatalf("insert out-of-order nodes: %v", err)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	file, err := st.GetNode(context.Background(), scanID, filePath)
+	if err != nil {
+		t.Fatalf("get out-of-order file: %v", err)
+	}
+	if file.ParentPath != dirPath || file.Name != "file.bin" {
+		t.Fatalf("unexpected file node: %+v", file)
+	}
+}
+
+func TestInsertNodesBatchRejectsMissingParent(t *testing.T) {
+	st := newTestStore(t)
+
+	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create scan: %v", err)
+	}
+
+	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer writer.Rollback()
+
+	err = writer.InsertNodesBatch(context.Background(), scanID, []Node{
+		{Path: filepath.Join("/scanroot", "orphan.bin"), ParentPath: "/scanroot", Name: "orphan.bin", Kind: "file", SizeBytes: 10},
+	})
+	if err == nil || !strings.Contains(err.Error(), "parent path") {
+		t.Fatalf("expected missing parent error, got %v", err)
+	}
+}
+
 func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	st := newTestStore(t)
 
@@ -144,7 +273,7 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	}
 
 	total := maxNodeRowsPerInsert + 10
-	nodes := make([]Node, 0, total)
+	nodes := []Node{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 0}}
 	for i := 0; i < total; i++ {
 		nodes = append(nodes, Node{
 			Path:       fmt.Sprintf("/scanroot/file-%d.bin", i),
@@ -168,8 +297,41 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 	if err := st.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM nodes WHERE scan_id=?`, scanID).Scan(&count); err != nil {
 		t.Fatalf("count nodes: %v", err)
 	}
-	if count != total {
-		t.Fatalf("expected %d nodes, got %d", total, count)
+	if count != len(nodes) {
+		t.Fatalf("expected %d nodes, got %d", len(nodes), count)
+	}
+}
+
+func TestCompactSchemaIsSmallerForDeepPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "scanroot")
+	nodes := syntheticDeepPathNodes(root, 1200)
+
+	legacyDBPath := filepath.Join(t.TempDir(), "legacy.db")
+	insertLegacyFixture(t, legacyDBPath, root, nodes)
+	legacySize := fileSize(t, legacyDBPath)
+
+	compactDBPath := filepath.Join(t.TempDir(), "compact.db")
+	st, err := Open(compactDBPath)
+	if err != nil {
+		t.Fatalf("open compact store: %v", err)
+	}
+	if err := st.Init(context.Background()); err != nil {
+		_ = st.Close()
+		t.Fatalf("init compact store: %v", err)
+	}
+	insertCompletedScan(t, st, root, nodes)
+	if err := st.OptimizeStorage(context.Background(), true); err != nil {
+		_ = st.Close()
+		t.Fatalf("optimize compact store: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close compact store: %v", err)
+	}
+	compactSize := fileSize(t, compactDBPath)
+	t.Logf("synthetic deep fixture DB size: legacy=%d compact=%d reduction=%.1f%%", legacySize, compactSize, 100*(1-float64(compactSize)/float64(legacySize)))
+
+	if compactSize >= legacySize*6/10 {
+		t.Fatalf("expected compact DB to be at least 40%% smaller, legacy=%d compact=%d", legacySize, compactSize)
 	}
 }
 
@@ -361,4 +523,116 @@ func TestNormalizeSortDefaultsToSizeDesc(t *testing.T) {
 	if got := normalizeSort("invalid"); !strings.Contains(got, "size_bytes DESC") {
 		t.Fatalf("expected fallback sort, got %q", got)
 	}
+}
+
+func syntheticDeepPathNodes(root string, fileCount int) []Node {
+	nodes := []Node{{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: int64(fileCount)}}
+	parent := root
+	for i := 0; i < 24; i++ {
+		name := fmt.Sprintf("segment-%02d-with-a-long-repeated-directory-name", i)
+		path := filepath.Join(parent, name)
+		nodes = append(nodes, Node{
+			Path:       path,
+			ParentPath: parent,
+			Name:       name,
+			Kind:       "dir",
+			SizeBytes:  int64(fileCount),
+			MtimeUnix:  1,
+		})
+		parent = path
+	}
+	for i := 0; i < fileCount; i++ {
+		name := fmt.Sprintf("file-%04d.bin", i)
+		nodes = append(nodes, Node{
+			Path:       filepath.Join(parent, name),
+			ParentPath: parent,
+			Name:       name,
+			Kind:       "file",
+			SizeBytes:  1,
+			MtimeUnix:  1,
+		})
+	}
+	return nodes
+}
+
+func insertLegacyFixture(t *testing.T, dbPath, root string, nodes []Node) {
+	t.Helper()
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s", filepath.ToSlash(dbPath)))
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE scan_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at TEXT,
+			finished_at TEXT,
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			root_path TEXT NOT NULL,
+			total_bytes INTEGER NOT NULL DEFAULT 0,
+			total_nodes INTEGER NOT NULL DEFAULT 0,
+			warning_count INTEGER NOT NULL DEFAULT 0
+		);`,
+		`CREATE TABLE nodes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scan_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			parent_path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('file','dir')),
+			size_bytes INTEGER NOT NULL,
+			mtime_unix INTEGER NOT NULL,
+			FOREIGN KEY (scan_id) REFERENCES scan_runs(id) ON DELETE CASCADE
+		);`,
+		`CREATE UNIQUE INDEX idx_nodes_scan_path ON nodes(scan_id, path);`,
+		`CREATE INDEX idx_nodes_scan_parent ON nodes(scan_id, parent_path);`,
+		`CREATE INDEX idx_nodes_scan_size ON nodes(scan_id, size_bytes DESC);`,
+		`CREATE INDEX idx_nodes_scan_parent_kind_name ON nodes(scan_id, parent_path, kind, name);`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create legacy fixture schema: %v", err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO scan_runs(id, status, root_path, total_nodes) VALUES(1, 'completed', ?, ?)`, root, len(nodes)); err != nil {
+		t.Fatalf("insert legacy scan: %v", err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin legacy fixture tx: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO nodes(scan_id, path, parent_path, name, kind, size_bytes, mtime_unix) VALUES(1, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("prepare legacy insert: %v", err)
+	}
+	for _, node := range nodes {
+		if _, err := stmt.Exec(node.Path, node.ParentPath, node.Name, node.Kind, node.SizeBytes, node.MtimeUnix); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			t.Fatalf("insert legacy node: %v", err)
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("close legacy insert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit legacy fixture: %v", err)
+	}
+	if _, err := db.Exec(`VACUUM`); err != nil {
+		t.Fatalf("vacuum legacy fixture: %v", err)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
 }

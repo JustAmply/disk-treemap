@@ -10,7 +10,6 @@ services:
       SCAN_MAX_CONCURRENCY: 4
       SCAN_TIMEOUT: 0
       MAX_CHILDREN_PER_QUERY: 500
-      SCAN_HISTORY_MAX_RUNS: 50
     volumes:
       - /host/path/to/analyze:/scanroot:ro
       - treemap-data:/data
