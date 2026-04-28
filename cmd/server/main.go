@@ -38,6 +38,9 @@ func main() {
 		log.Fatalf("prune operational scans: %v", err)
 	} else if len(deleted) > 0 {
 		log.Printf("pruned %d old scan run(s) on startup", len(deleted))
+		if err := st.OptimizeStorage(context.Background(), false); err != nil {
+			log.Printf("storage optimize warning: %v", err)
+		}
 	}
 
 	svc := app.NewService(cfg, st)

@@ -9,9 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 )
 
 type NodeRecord struct {
+	NodeID     int64
+	ParentID   *int64
 	Path       string
 	ParentPath string
 	Name       string
@@ -54,7 +57,12 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		sem = make(chan struct{}, s.maxConcurrency-1)
 	}
 
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", sem, cb)
+	var nextNodeID int64
+	allocNodeID := func() int64 {
+		return atomic.AddInt64(&nextNodeID, 1)
+	}
+
+	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, sem, allocNodeID, cb)
 	if err != nil {
 		return Result{}, err
 	}
@@ -66,12 +74,30 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 	}, nil
 }
 
-func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem chan struct{}, emit NodeCallback) (int64, int64, int64, error) {
+func (s *Scanner) scanNode(
+	ctx context.Context,
+	path, parentPath string,
+	parentID int64,
+	hasParent bool,
+	entry fs.DirEntry,
+	sem chan struct{},
+	allocNodeID func() int64,
+	emit NodeCallback,
+) (int64, int64, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, 0, 0, err
 	}
 
-	info, err := os.Lstat(path)
+	var info fs.FileInfo
+	var err error
+	if entry != nil {
+		if entry.Type()&os.ModeSymlink != 0 {
+			return 0, 0, 0, nil
+		}
+		info, err = entry.Info()
+	} else {
+		info, err = os.Lstat(path)
+	}
 	if err != nil {
 		if isNonFatal(err) {
 			log.Printf("scan warning: lstat %q: %v", path, err)
@@ -84,7 +110,16 @@ func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem cha
 		return 0, 0, 0, nil
 	}
 
+	nodeID := allocNodeID()
+	var nodeParentID *int64
+	if hasParent {
+		parent := parentID
+		nodeParentID = &parent
+	}
+
 	node := NodeRecord{
+		NodeID:     nodeID,
+		ParentID:   nodeParentID,
 		Path:       path,
 		ParentPath: parentPath,
 		Name:       filepath.Base(path),
@@ -135,13 +170,9 @@ func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem cha
 		warningCount += warnings
 	}
 
-	runSync := func(childPath string) {
-		sz, n, w, childErr := s.scanNode(ctx, childPath, path, sem, emit)
-		apply(sz, n, w, childErr)
-	}
-
 	for _, entry := range entries {
 		childPath := filepath.Join(path, entry.Name())
+		childEntry := entry
 
 		spawned := false
 		if sem != nil {
@@ -154,16 +185,17 @@ func (s *Scanner) scanNode(ctx context.Context, path, parentPath string, sem cha
 
 		if spawned {
 			wg.Add(1)
-			go func(p string) {
+			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				sz, n, w, childErr := s.scanNode(ctx, p, path, sem, emit)
+				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, sem, allocNodeID, emit)
 				apply(sz, n, w, childErr)
-			}(childPath)
+			}(childPath, childEntry)
 			continue
 		}
 
-		runSync(childPath)
+		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, sem, allocNodeID, emit)
+		apply(sz, n, w, childErr)
 	}
 
 	wg.Wait()

@@ -39,6 +39,11 @@ type liveProgress struct {
 	UpdatedAt    time.Time
 }
 
+type scannedNodeWrite struct {
+	Stored   store.StoredNode
+	Progress store.Node
+}
+
 type Service struct {
 	cfg           config.Config
 	store         *store.Store
@@ -181,14 +186,46 @@ func (s *Service) runScan(scanID int64) {
 		queueSize = 8
 	}
 
-	nodeCh := make(chan store.Node, queueSize)
+	nodeCh := make(chan scannedNodeWrite, queueSize)
 	writerErrCh := make(chan error, 1)
 
 	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchSize, progressInterval)
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, s.cfg.ScanMaxConcurrency)
+	var fallbackMu sync.Mutex
+	var fallbackNextID int64
+	fallbackPathIDs := map[string]int64{}
+	toStoredNode := func(node scan.NodeRecord) store.StoredNode {
+		nodeID := node.NodeID
+		parentID := node.ParentID
+		if nodeID == 0 {
+			fallbackMu.Lock()
+			if existingID, ok := fallbackPathIDs[node.Path]; ok {
+				nodeID = existingID
+			} else {
+				fallbackNextID++
+				nodeID = fallbackNextID
+				fallbackPathIDs[node.Path] = nodeID
+			}
+			if parentID == nil && node.ParentPath != "" {
+				if id, ok := fallbackPathIDs[node.ParentPath]; ok {
+					parent := id
+					parentID = &parent
+				}
+			}
+			fallbackMu.Unlock()
+		}
+		return store.StoredNode{
+			NodeID:    nodeID,
+			ParentID:  parentID,
+			Name:      node.Name,
+			Kind:      node.Kind,
+			SizeBytes: node.SizeBytes,
+			MtimeUnix: node.MtimeUnix,
+		}
+	}
 	result, scanErr := scanner.Scan(scanCtx, func(node scan.NodeRecord) error {
-		dbNode := store.Node{
+		progressNode := store.Node{
 			Path:       node.Path,
 			ParentPath: node.ParentPath,
 			Name:       node.Name,
@@ -200,7 +237,7 @@ func (s *Service) runScan(scanID int64) {
 		select {
 		case <-scanCtx.Done():
 			return scanCtx.Err()
-		case nodeCh <- dbNode:
+		case nodeCh <- scannedNodeWrite{Stored: toStoredNode(node), Progress: progressNode}:
 			return nil
 		}
 	})
@@ -237,6 +274,9 @@ func (s *Service) runScan(scanID int64) {
 
 	s.clearRunning(scanID)
 	s.pruneOperationalScans(scanID)
+	if err := s.store.OptimizeStorage(context.Background(), true); err != nil {
+		log.Printf("scan #%d storage optimize warning: %v", scanID, err)
+	}
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 }
 
@@ -244,7 +284,7 @@ func (s *Service) runNodeWriter(
 	ctx context.Context,
 	scanID int64,
 	writer *store.NodeWriter,
-	nodeCh <-chan store.Node,
+	nodeCh <-chan scannedNodeWrite,
 	writerErrCh chan<- error,
 	batchSize int,
 	progressInterval time.Duration,
@@ -252,12 +292,16 @@ func (s *Service) runNodeWriter(
 	ticker := time.NewTicker(progressInterval)
 	defer ticker.Stop()
 
-	batch := make([]store.Node, 0, batchSize)
+	batch := make([]scannedNodeWrite, 0, batchSize)
 	flush := func(now time.Time) error {
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := writer.InsertNodesBatch(ctx, scanID, batch); err != nil {
+		storedBatch := make([]store.StoredNode, 0, len(batch))
+		for _, node := range batch {
+			storedBatch = append(storedBatch, node.Stored)
+		}
+		if err := writer.InsertStoredNodesBatch(ctx, scanID, storedBatch); err != nil {
 			return err
 		}
 		s.recordProgressBatch(scanID, batch, now)
@@ -291,13 +335,14 @@ func (s *Service) runNodeWriter(
 	}
 }
 
-func (s *Service) recordProgressBatch(scanID int64, batch []store.Node, updatedAt time.Time) {
+func (s *Service) recordProgressBatch(scanID int64, batch []scannedNodeWrite, updatedAt time.Time) {
 	var nodes int64
 	var files int64
 	var dirs int64
 	var bytes int64
 
-	for _, node := range batch {
+	for _, item := range batch {
+		node := item.Progress
 		nodes++
 		switch node.Kind {
 		case "file":
@@ -314,7 +359,7 @@ func (s *Service) recordProgressBatch(scanID int64, batch []store.Node, updatedA
 		return
 	}
 
-	s.progress.CurrentPath = batch[len(batch)-1].Path
+	s.progress.CurrentPath = batch[len(batch)-1].Progress.Path
 	s.progress.ScannedNodes += nodes
 	s.progress.ScannedFiles += files
 	s.progress.ScannedDirs += dirs

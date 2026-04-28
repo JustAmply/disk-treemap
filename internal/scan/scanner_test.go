@@ -114,6 +114,42 @@ func TestScannerAllowsConcurrentCallbacks(t *testing.T) {
 	}
 }
 
+func TestScannerEmitsNodeAndParentIDs(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "dir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "a.bin")
+	writeSizedFile(t, file, 10)
+
+	s := New(root, 2)
+	nodes := make(map[string]NodeRecord)
+	_, err := s.Scan(context.Background(), func(node NodeRecord) error {
+		nodes[node.Path] = node
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	rootNode := nodes[root]
+	dirNode := nodes[dir]
+	fileNode := nodes[file]
+	if rootNode.NodeID == 0 || dirNode.NodeID == 0 || fileNode.NodeID == 0 {
+		t.Fatalf("expected non-zero node ids: root=%d dir=%d file=%d", rootNode.NodeID, dirNode.NodeID, fileNode.NodeID)
+	}
+	if rootNode.ParentID != nil {
+		t.Fatalf("expected root parent id to be nil, got %d", *rootNode.ParentID)
+	}
+	if dirNode.ParentID == nil || *dirNode.ParentID != rootNode.NodeID {
+		t.Fatalf("expected dir parent id %d, got %+v", rootNode.NodeID, dirNode.ParentID)
+	}
+	if fileNode.ParentID == nil || *fileNode.ParentID != dirNode.NodeID {
+		t.Fatalf("expected file parent id %d, got %+v", dirNode.NodeID, fileNode.ParentID)
+	}
+}
+
 func writeSizedFile(t *testing.T, path string, size int) {
 	t.Helper()
 	data := make([]byte, size)
