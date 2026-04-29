@@ -266,12 +266,14 @@ func (s *Service) runScan(scanID int64) {
 	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchController, progressInterval)
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, s.scanMaxConcurrency())
+	autotuneCtx, cancelAutotune := context.WithCancel(scanCtx)
+	defer cancelAutotune()
 	if tuner, ok := scanner.(scan.AdjustableConcurrency); ok {
 		if s.cfg.ScanAutotune {
 			initial := initialAutotuneConcurrency(s.scanMinConcurrency(), s.scanMaxConcurrency())
 			applied := tuner.SetConcurrencyLimit(initial)
 			log.Printf("scan #%d autotune enabled: initial_concurrency=%d max_concurrency=%d", scanID, applied, s.scanMaxConcurrency())
-			go s.runScanAutotuner(scanCtx, scanID, tuner, batchController)
+			go s.runScanAutotuner(autotuneCtx, scanID, tuner, batchController)
 		} else {
 			applied := tuner.SetConcurrencyLimit(s.scanMaxConcurrency())
 			log.Printf("scan #%d autotune disabled: fixed_concurrency=%d", scanID, applied)
@@ -331,6 +333,7 @@ func (s *Service) runScan(scanID int64) {
 
 	close(nodeCh)
 	writerErr := <-writerErrCh
+	cancelAutotune()
 
 	if scanErr == nil && writerErr == nil && isUnreadableScanResult(result) {
 		scanErr = fmt.Errorf("scan found no readable files under %q (warnings: %d); check mount and permissions", s.cfg.AnalyzeRoot, result.WarningCount)
@@ -505,6 +508,7 @@ func (s *Service) recordWriteBatchSize(scanID int64, size int) {
 }
 
 type scanAutotuneSample struct {
+	Active            bool
 	EnqueuedNodes     int64
 	ScannedNodes      int64
 	EnqueuedPerSec    float64
@@ -551,7 +555,13 @@ func (s *Service) runScanAutotuner(ctx context.Context, scanID int64, tuner scan
 	for {
 		select {
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
 			current := s.scanAutotuneSample(scanID)
+			if !current.Active {
+				return
+			}
 			current.HadFlush = current.FlushCount > previous.FlushCount
 			enqueuedDelta := current.EnqueuedNodes - previous.EnqueuedNodes
 			if enqueuedDelta < 0 {
@@ -645,6 +655,7 @@ func (s *Service) scanAutotuneSample(scanID int64) scanAutotuneSample {
 	}
 
 	return scanAutotuneSample{
+		Active:            true,
 		EnqueuedNodes:     s.metrics.EnqueuedNodes,
 		ScannedNodes:      s.progress.ScannedNodes,
 		QueueOccupancy:    occupancy,
