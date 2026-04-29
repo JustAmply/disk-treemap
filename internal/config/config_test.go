@@ -137,7 +137,7 @@ func TestLoadFromEnvDefaultsAutotuneOn(t *testing.T) {
 	if cfg.ScanMinWriteBatch != 1 {
 		t.Fatalf("unexpected min write batch size: %d", cfg.ScanMinWriteBatch)
 	}
-	if cfg.ScanMaxWriteBatch != 32768 {
+	if cfg.ScanMaxWriteBatch != 8192 {
 		t.Fatalf("unexpected max write batch size: %d", cfg.ScanMaxWriteBatch)
 	}
 }

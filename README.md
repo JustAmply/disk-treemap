@@ -124,7 +124,7 @@ Notes:
 | `SCAN_MAX_CONCURRENCY` | automatic, up to `64` | Fixed concurrency when autotune is disabled; upper bound when autotune is enabled |
 | `SCAN_WRITE_BATCH_SIZE` | `2048` | Initial batch size used when writing scan results to storage |
 | `SCAN_MIN_WRITE_BATCH_SIZE` | `1` | Lower bound for autotuned scan result write batches |
-| `SCAN_MAX_WRITE_BATCH_SIZE` | `32768` | Upper bound for autotuned scan result write batches |
+| `SCAN_MAX_WRITE_BATCH_SIZE` | `8192` | Upper bound for autotuned scan result write batches |
 | `SCAN_PROGRESS_INTERVAL_MS` | `200` | How often progress updates are emitted while a scan runs |
 
 </details>

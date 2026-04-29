@@ -349,11 +349,12 @@ func (s *Service) runScan(scanID int64) {
 		return
 	}
 
+	commitStarted := time.Now()
 	if err := writer.Commit(); err != nil {
 		s.finishFailure(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
-	log.Printf("scan #%d committed node batch: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
+	log.Printf("scan #%d committed staged nodes: nodes=%d bytes=%d warnings=%d duration=%s", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount, time.Since(commitStarted))
 
 	if err := s.store.CompleteScan(ctx, scanID, "completed", time.Now().UTC(), result.TotalBytes, result.TotalNodes, result.WarningCount, ""); err != nil {
 		s.finishFailure(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)

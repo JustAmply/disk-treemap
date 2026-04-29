@@ -16,6 +16,7 @@ const (
 	sqliteMaxBindParameters = 32766
 	nodeInsertColumnCount   = 7
 	maxNodeRowsPerInsert    = sqliteMaxBindParameters / nodeInsertColumnCount
+	nodeWriterStageTable    = "node_writer_stage"
 
 	compactKindFile = 1
 	compactKindDir  = 2
@@ -81,6 +82,7 @@ type ChildAggregate struct {
 
 type NodeWriter struct {
 	tx         *sql.Tx
+	insertInto string
 	nextNodeID int64
 	pathIDs    map[string]int64
 }
@@ -293,8 +295,27 @@ func (s *Store) BeginNodeWriter(ctx context.Context, scanID int64) (*NodeWriter,
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS temp.`+nodeWriterStageTable); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("drop stale node writer stage: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TEMP TABLE `+nodeWriterStageTable+` (
+			scan_id INTEGER NOT NULL,
+			node_id INTEGER NOT NULL,
+			parent_id INTEGER,
+			name TEXT NOT NULL,
+			kind INTEGER NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			mtime_unix INTEGER NOT NULL
+		)
+	`); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("create node writer stage: %w", err)
+	}
 	return &NodeWriter{
 		tx:         tx,
+		insertInto: nodeWriterStageTable,
 		nextNodeID: 1,
 		pathIDs:    map[string]int64{},
 	}, nil
@@ -369,7 +390,9 @@ func (w *NodeWriter) InsertStoredNodesBatch(ctx context.Context, scanID int64, n
 
 func (w *NodeWriter) insertStoredNodeChunk(ctx context.Context, scanID int64, nodes []StoredNode) error {
 	var query strings.Builder
-	query.WriteString(`INSERT INTO nodes(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix) VALUES `)
+	query.WriteString(`INSERT INTO `)
+	query.WriteString(w.insertInto)
+	query.WriteString(`(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix) VALUES `)
 
 	args := make([]any, 0, len(nodes)*nodeInsertColumnCount)
 	for i, node := range nodes {
@@ -394,6 +417,19 @@ func (w *NodeWriter) insertStoredNodeChunk(ctx context.Context, scanID int64, no
 func (w *NodeWriter) Commit() error {
 	if w == nil {
 		return nil
+	}
+	if _, err := w.tx.Exec(`
+		INSERT INTO nodes(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix)
+		SELECT scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix
+		FROM ` + nodeWriterStageTable + `
+		ORDER BY scan_id, node_id
+	`); err != nil {
+		_ = w.tx.Rollback()
+		return fmt.Errorf("materialize staged nodes: %w", err)
+	}
+	if _, err := w.tx.Exec(`DROP TABLE IF EXISTS temp.` + nodeWriterStageTable); err != nil {
+		_ = w.tx.Rollback()
+		return fmt.Errorf("drop node writer stage: %w", err)
 	}
 	return w.tx.Commit()
 }

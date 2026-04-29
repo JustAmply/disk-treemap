@@ -18,7 +18,7 @@ const (
 	defaultScanMinConcurrency  = 1
 	defaultScanWriteBatchSize  = 2048
 	defaultScanMinWriteBatch   = 1
-	defaultScanMaxWriteBatch   = 32768
+	defaultScanMaxWriteBatch   = 8192
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500

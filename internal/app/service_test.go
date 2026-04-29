@@ -329,8 +329,8 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
-	if !strings.Contains(run.Error, "write nodes") {
-		t.Fatalf("expected write node error, got %q", run.Error)
+	if !strings.Contains(run.Error, "commit nodes") {
+		t.Fatalf("expected commit node error, got %q", run.Error)
 	}
 }
 
