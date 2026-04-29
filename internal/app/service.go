@@ -21,10 +21,12 @@ const (
 	storageOptimizeTimeout      = 30 * time.Second
 	scanAutotuneSampleInterval  = 2 * time.Second
 	scanAutotuneWarmup          = 2 * time.Second
+	scanAutotuneHeartbeat       = 30 * time.Second
 	scanAutotuneHealthyQueueMax = 0.70
 	scanAutotuneFullQueueMin    = 0.90
 	scanAutotuneDropRatio       = 0.85
 	scanAutotuneSlowFlush       = 2 * time.Second
+	scanAutotuneStallSamples    = 5
 	exploreExpandedDirLimit     = 12
 	exploreBranchLimit          = 14
 	exploreTreemapNodeBudget    = 240
@@ -54,6 +56,7 @@ type scanRuntimeMetrics struct {
 	WriterQueueCap    int
 	WriteBatchSize    int
 	LastFlushDuration time.Duration
+	LastFlushAt       time.Time
 	FlushCount        int64
 }
 
@@ -474,6 +477,7 @@ func (s *Service) recordWriterFlush(scanID int64, duration time.Duration) {
 		return
 	}
 	s.metrics.LastFlushDuration = duration
+	s.metrics.LastFlushAt = time.Now().UTC()
 	s.metrics.FlushCount++
 }
 
@@ -491,6 +495,7 @@ type scanAutotuneSample struct {
 	QueueOccupancy    float64
 	WriteBatchSize    int
 	LastFlushDuration time.Duration
+	LastFlushAt       time.Time
 	FlushCount        int64
 	HadFlush          bool
 }
@@ -520,6 +525,8 @@ func (s *Service) runScanAutotuner(ctx context.Context, scanID int64, tuner scan
 	stats := tuner.ConcurrencyStats()
 	state := scanAutotuneState{Limit: stats.Limit}
 	previous := s.scanAutotuneSample(scanID)
+	lastStatusLog := time.Now()
+	noProgressSamples := 0
 
 	ticker := time.NewTicker(scanAutotuneSampleInterval)
 	defer ticker.Stop()
@@ -533,10 +540,16 @@ func (s *Service) runScanAutotuner(ctx context.Context, scanID int64, tuner scan
 			if nodesDelta < 0 {
 				nodesDelta = 0
 			}
+			if nodesDelta == 0 {
+				noProgressSamples++
+			} else {
+				noProgressSamples = 0
+			}
 			nodesSec := float64(nodesDelta) / scanAutotuneSampleInterval.Seconds()
 			stats = tuner.ConcurrencyStats()
 			state.Limit = stats.Limit
 			next := nextAutotuneLimit(state, current, nodesSec, s.scanMinConcurrency(), s.scanMaxConcurrency(), s.scanMinWriteBatchSize(), s.scanMaxWriteBatchSize())
+			settingsChanged := false
 			if next.Limit != stats.Limit {
 				applied := tuner.SetConcurrencyLimit(next.Limit)
 				log.Printf(
@@ -551,6 +564,7 @@ func (s *Service) runScanAutotuner(ctx context.Context, scanID int64, tuner scan
 					stats.InUse,
 				)
 				next.Limit = applied
+				settingsChanged = true
 			}
 			if batchController != nil && next.WriteBatchSize != 0 && next.WriteBatchSize != current.WriteBatchSize {
 				applied := batchController.Set(next.WriteBatchSize)
@@ -565,6 +579,27 @@ func (s *Service) runScanAutotuner(ctx context.Context, scanID int64, tuner scan
 					current.LastFlushDuration,
 				)
 				next.WriteBatchSize = applied
+				settingsChanged = true
+			}
+			now := time.Now()
+			shouldLogStatus := !settingsChanged && now.Sub(lastStatusLog) >= scanAutotuneHeartbeat
+			if !settingsChanged && noProgressSamples >= scanAutotuneStallSamples && current.QueueOccupancy >= scanAutotuneFullQueueMin {
+				shouldLogStatus = true
+			}
+			if shouldLogStatus {
+				log.Printf(
+					"scan #%d autotune status: concurrency=%d nodes_per_sec=%.1f queue=%.0f%% batch=%d flush=%s last_flush_age=%s in_use=%d no_progress_samples=%d",
+					scanID,
+					stats.Limit,
+					nodesSec,
+					current.QueueOccupancy*100,
+					current.WriteBatchSize,
+					current.LastFlushDuration,
+					flushAge(now, current.LastFlushAt),
+					stats.InUse,
+					noProgressSamples,
+				)
+				lastStatusLog = now
 			}
 			state = next
 			previous = current
@@ -591,6 +626,7 @@ func (s *Service) scanAutotuneSample(scanID int64) scanAutotuneSample {
 		QueueOccupancy:    occupancy,
 		WriteBatchSize:    s.metrics.WriteBatchSize,
 		LastFlushDuration: s.metrics.LastFlushDuration,
+		LastFlushAt:       s.metrics.LastFlushAt,
 		FlushCount:        s.metrics.FlushCount,
 	}
 }
@@ -652,7 +688,7 @@ func nextAutotuneLimit(state scanAutotuneState, sample scanAutotuneSample, nodes
 		return nextAutotuneBatchSize(state, sample, nodesSec, minBatchSize, maxBatchSize)
 	}
 
-	throughputHealthy := state.PreviousNodesSec == 0 || nodesSec >= state.PreviousNodesSec*scanAutotuneDropRatio
+	throughputHealthy := nodesSec > 0 && (state.PreviousNodesSec == 0 || nodesSec >= state.PreviousNodesSec*scanAutotuneDropRatio)
 	if sample.QueueOccupancy < scanAutotuneHealthyQueueMax && throughputHealthy && state.Limit < maxConcurrency {
 		state.Limit = clampInt(state.Limit+increaseConcurrencyStep(state.Limit), minConcurrency, maxConcurrency)
 		state.LastAction = "increase"
@@ -665,6 +701,17 @@ func nextAutotuneLimit(state scanAutotuneState, sample scanAutotuneSample, nodes
 	state.PreviousNodesSec = nodesSec
 	state.PreviousFlushDuration = sample.LastFlushDuration
 	return nextAutotuneBatchSize(state, sample, nodesSec, minBatchSize, maxBatchSize)
+}
+
+func flushAge(now time.Time, flushedAt time.Time) time.Duration {
+	if flushedAt.IsZero() {
+		return 0
+	}
+	age := now.Sub(flushedAt)
+	if age < 0 {
+		return 0
+	}
+	return age.Round(time.Second)
 }
 
 func nextAutotuneBatchSize(state scanAutotuneState, sample scanAutotuneSample, nodesSec float64, minBatchSize, maxBatchSize int) scanAutotuneState {

@@ -539,6 +539,21 @@ func TestNextAutotuneLimitIncreasesWhenThroughputHealthy(t *testing.T) {
 	}
 }
 
+func TestNextAutotuneLimitDoesNotIncreaseBeforeThroughputExists(t *testing.T) {
+	state := scanAutotuneState{
+		Limit: 8,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.20, WriteBatchSize: 2048}, 0, 1, 32, 1, 32768)
+
+	if next.Limit != state.Limit {
+		t.Fatalf("expected concurrency to hold without throughput, got %d from %d", next.Limit, state.Limit)
+	}
+	if next.LastAction != "hold" {
+		t.Fatalf("expected hold action, got %q", next.LastAction)
+	}
+}
+
 func TestNextAutotuneLimitDecreasesWhenQueueSaturated(t *testing.T) {
 	state := scanAutotuneState{
 		Limit:            8,
