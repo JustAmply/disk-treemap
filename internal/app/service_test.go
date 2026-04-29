@@ -620,6 +620,7 @@ func TestNextAutotuneLimitIncreasesBatchSizeWhenQueueSaturated(t *testing.T) {
 
 	next := nextAutotuneLimit(state, scanAutotuneSample{
 		QueueOccupancy:    0.95,
+		EnqueuedPerSec:    150,
 		WriteBatchSize:    2048,
 		LastFlushDuration: 20 * time.Millisecond,
 		HadFlush:          true,
@@ -630,6 +631,30 @@ func TestNextAutotuneLimitIncreasesBatchSizeWhenQueueSaturated(t *testing.T) {
 	}
 	if next.LastBatchAction != "increase" {
 		t.Fatalf("expected batch increase action, got %q", next.LastBatchAction)
+	}
+}
+
+func TestNextAutotuneLimitDoesNotIncreaseBatchSizeWhileQueueDrains(t *testing.T) {
+	state := scanAutotuneState{
+		Limit:            4,
+		PreviousNodesSec: 100,
+		FullQueueSamples: 3,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{
+		QueueOccupancy:    0.95,
+		QueueDelta:        -0.04,
+		EnqueuedPerSec:    50,
+		WriteBatchSize:    2048,
+		LastFlushDuration: 20 * time.Millisecond,
+		HadFlush:          true,
+	}, 100, 1, 32, 512, 8192)
+
+	if next.WriteBatchSize != 2048 {
+		t.Fatalf("expected batch size to hold while backlog drains, got %d", next.WriteBatchSize)
+	}
+	if next.LastBatchAction != "hold" {
+		t.Fatalf("expected batch hold action, got %q", next.LastBatchAction)
 	}
 }
 
@@ -672,6 +697,18 @@ func TestNextAutotuneLimitDecreasesBatchSizeAggressivelyWhenFlushVerySlow(t *tes
 	}
 	if next.LastBatchAction != "decrease" {
 		t.Fatalf("expected batch decrease action, got %q", next.LastBatchAction)
+	}
+}
+
+func TestAutotuneChangeSummaryOmitsNoOpChanges(t *testing.T) {
+	got := autotuneChangeSummary(1, 1, 1024, 2048)
+	if got != "batch_size 1024 -> 2048" {
+		t.Fatalf("unexpected batch-only summary: %q", got)
+	}
+
+	got = autotuneChangeSummary(4, 2, 1024, 1024)
+	if got != "concurrency 4 -> 2" {
+		t.Fatalf("unexpected concurrency-only summary: %q", got)
 	}
 }
 
