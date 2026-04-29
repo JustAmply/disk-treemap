@@ -21,6 +21,8 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	t.Setenv("ANALYZE_ROOT", root)
 	t.Setenv("LISTEN_ADDR", ":9090")
 	t.Setenv("DATA_DIR", data)
+	t.Setenv("SCAN_AUTOTUNE", "false")
+	t.Setenv("SCAN_MIN_CONCURRENCY", "3")
 	t.Setenv("SCAN_MAX_CONCURRENCY", "8")
 	t.Setenv("SCAN_WRITE_BATCH_SIZE", "1024")
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "350")
@@ -40,6 +42,12 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	}
 	if cfg.DataDir != data {
 		t.Fatalf("unexpected data dir: %q", cfg.DataDir)
+	}
+	if cfg.ScanAutotune {
+		t.Fatalf("expected autotune to be disabled")
+	}
+	if cfg.ScanMinConcurrency != 3 {
+		t.Fatalf("unexpected min concurrency: %d", cfg.ScanMinConcurrency)
 	}
 	if cfg.ScanMaxConcurrency != 8 {
 		t.Fatalf("unexpected concurrency: %d", cfg.ScanMaxConcurrency)
@@ -64,6 +72,7 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("ANALYZE_ROOT", root)
+	t.Setenv("SCAN_MIN_CONCURRENCY", "0")
 	t.Setenv("SCAN_MAX_CONCURRENCY", "0")
 	t.Setenv("SCAN_WRITE_BATCH_SIZE", "0")
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "1")
@@ -74,8 +83,11 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 		t.Fatalf("load config: %v", err)
 	}
 
+	if cfg.ScanMinConcurrency != 1 {
+		t.Fatalf("expected min concurrency to floor at 1, got %d", cfg.ScanMinConcurrency)
+	}
 	if cfg.ScanMaxConcurrency != 1 {
-		t.Fatalf("expected concurrency to floor at 1, got %d", cfg.ScanMaxConcurrency)
+		t.Fatalf("expected max concurrency to floor at min, got %d", cfg.ScanMaxConcurrency)
 	}
 	if cfg.ScanWriteBatchSize != 1 {
 		t.Fatalf("expected write batch size to floor at 1, got %d", cfg.ScanWriteBatchSize)
@@ -85,5 +97,44 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	}
 	if cfg.MaxChildrenPerQuery != defaultMaxChildrenPerQuery {
 		t.Fatalf("expected default max children, got %d", cfg.MaxChildrenPerQuery)
+	}
+}
+
+func TestLoadFromEnvDefaultsAutotuneOn(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ANALYZE_ROOT", root)
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if !cfg.ScanAutotune {
+		t.Fatalf("expected autotune enabled by default")
+	}
+	if cfg.ScanMinConcurrency != 1 {
+		t.Fatalf("unexpected min concurrency: %d", cfg.ScanMinConcurrency)
+	}
+	if cfg.ScanMaxConcurrency < 4 || cfg.ScanMaxConcurrency > 64 {
+		t.Fatalf("expected bounded automatic max concurrency, got %d", cfg.ScanMaxConcurrency)
+	}
+}
+
+func TestLoadFromEnvClampsMaxToMinConcurrency(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ANALYZE_ROOT", root)
+	t.Setenv("SCAN_MIN_CONCURRENCY", "6")
+	t.Setenv("SCAN_MAX_CONCURRENCY", "2")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.ScanMinConcurrency != 6 {
+		t.Fatalf("unexpected min concurrency: %d", cfg.ScanMinConcurrency)
+	}
+	if cfg.ScanMaxConcurrency != 6 {
+		t.Fatalf("expected max concurrency to clamp to min, got %d", cfg.ScanMaxConcurrency)
 	}
 }

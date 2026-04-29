@@ -523,10 +523,83 @@ func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
 	}
 }
 
+func TestNextAutotuneLimitIncreasesWhenThroughputHealthy(t *testing.T) {
+	state := scanAutotuneState{
+		Limit:            8,
+		PreviousNodesSec: 100,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.20}, 110, 1, 32)
+
+	if next.Limit <= state.Limit {
+		t.Fatalf("expected concurrency increase, got %d from %d", next.Limit, state.Limit)
+	}
+	if next.LastAction != "increase" {
+		t.Fatalf("expected increase action, got %q", next.LastAction)
+	}
+}
+
+func TestNextAutotuneLimitDecreasesWhenQueueSaturated(t *testing.T) {
+	state := scanAutotuneState{
+		Limit:            8,
+		PreviousNodesSec: 100,
+		FullQueueSamples: 1,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.95}, 100, 1, 32)
+
+	if next.Limit >= state.Limit {
+		t.Fatalf("expected concurrency decrease, got %d from %d", next.Limit, state.Limit)
+	}
+	if next.LastAction != "decrease" {
+		t.Fatalf("expected decrease action, got %q", next.LastAction)
+	}
+}
+
+func TestNextAutotuneLimitHoldsAfterDecrease(t *testing.T) {
+	state := scanAutotuneState{
+		Limit:            6,
+		PreviousNodesSec: 100,
+		LastAction:       "decrease",
+		HoldSamples:      1,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.10}, 120, 1, 32)
+
+	if next.Limit != state.Limit {
+		t.Fatalf("expected hold after decrease, got %d from %d", next.Limit, state.Limit)
+	}
+	if next.HoldSamples != 0 {
+		t.Fatalf("expected hold sample to be consumed, got %d", next.HoldSamples)
+	}
+}
+
+func TestNextAutotuneLimitDecreasesWhenFlushLatencyRises(t *testing.T) {
+	state := scanAutotuneState{
+		Limit:                 8,
+		PreviousNodesSec:      100,
+		PreviousFlushDuration: 50 * time.Millisecond,
+	}
+
+	next := nextAutotuneLimit(state, scanAutotuneSample{
+		QueueOccupancy:    0.80,
+		LastFlushDuration: 150 * time.Millisecond,
+	}, 100, 1, 32)
+
+	if next.Limit >= state.Limit {
+		t.Fatalf("expected concurrency decrease, got %d from %d", next.Limit, state.Limit)
+	}
+	if next.LastAction != "decrease" {
+		t.Fatalf("expected decrease action, got %q", next.LastAction)
+	}
+}
+
 func testConfig(root, dataDir string) config.Config {
 	return config.Config{
 		AnalyzeRoot:          root,
 		DataDir:              dataDir,
+		ScanAutotune:         false,
+		ScanMinConcurrency:   1,
 		ScanMaxConcurrency:   2,
 		ScanWriteBatchSize:   8,
 		ScanProgressInterval: 25 * time.Millisecond,

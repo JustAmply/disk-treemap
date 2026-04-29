@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -13,7 +14,8 @@ import (
 const (
 	defaultListenAddr          = ":8080"
 	defaultDataDir             = "/data"
-	defaultScanMaxConcurrency  = 4
+	defaultScanAutotune        = true
+	defaultScanMinConcurrency  = 1
 	defaultScanWriteBatchSize  = 2048
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
@@ -24,6 +26,8 @@ type Config struct {
 	AnalyzeRoot          string
 	ListenAddr           string
 	DataDir              string
+	ScanAutotune         bool
+	ScanMinConcurrency   int
 	ScanMaxConcurrency   int
 	ScanWriteBatchSize   int
 	ScanProgressInterval time.Duration
@@ -36,7 +40,9 @@ func LoadFromEnv() (Config, error) {
 		AnalyzeRoot:          os.Getenv("ANALYZE_ROOT"),
 		ListenAddr:           getenvDefault("LISTEN_ADDR", defaultListenAddr),
 		DataDir:              getenvDefault("DATA_DIR", defaultDataDir),
-		ScanMaxConcurrency:   defaultScanMaxConcurrency,
+		ScanAutotune:         defaultScanAutotune,
+		ScanMinConcurrency:   defaultScanMinConcurrency,
+		ScanMaxConcurrency:   defaultScanMaxConcurrency(),
 		ScanWriteBatchSize:   defaultScanWriteBatchSize,
 		ScanProgressInterval: time.Duration(defaultScanProgressMS) * time.Millisecond,
 		MaxChildrenPerQuery:  defaultMaxChildrenPerQuery,
@@ -50,12 +56,25 @@ func LoadFromEnv() (Config, error) {
 	}
 
 	var err error
-	cfg.ScanMaxConcurrency, err = parseIntEnv("SCAN_MAX_CONCURRENCY", defaultScanMaxConcurrency)
+	cfg.ScanAutotune, err = parseBoolEnv("SCAN_AUTOTUNE", defaultScanAutotune)
 	if err != nil {
 		return Config{}, err
 	}
-	if cfg.ScanMaxConcurrency < 1 {
-		cfg.ScanMaxConcurrency = 1
+
+	cfg.ScanMinConcurrency, err = parseIntEnv("SCAN_MIN_CONCURRENCY", defaultScanMinConcurrency)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.ScanMinConcurrency < 1 {
+		cfg.ScanMinConcurrency = 1
+	}
+
+	cfg.ScanMaxConcurrency, err = parseIntEnv("SCAN_MAX_CONCURRENCY", defaultScanMaxConcurrency())
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.ScanMaxConcurrency < cfg.ScanMinConcurrency {
+		cfg.ScanMaxConcurrency = cfg.ScanMinConcurrency
 	}
 
 	cfg.ScanWriteBatchSize, err = parseIntEnv("SCAN_WRITE_BATCH_SIZE", defaultScanWriteBatchSize)
@@ -99,6 +118,17 @@ func LoadFromEnv() (Config, error) {
 	return cfg, nil
 }
 
+func defaultScanMaxConcurrency() int {
+	n := runtime.NumCPU() * 4
+	if n < 4 {
+		n = 4
+	}
+	if n > 64 {
+		n = 64
+	}
+	return n
+}
+
 func (c Config) DatabasePath() string {
 	return filepath.Join(c.DataDir, "scan.db")
 }
@@ -113,6 +143,18 @@ func parseIntEnv(name string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
 	}
 	return n, nil
+}
+
+func parseBoolEnv(name string, defaultValue bool) (bool, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return defaultValue, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	return b, nil
 }
 
 func getenvDefault(name, defaultValue string) string {

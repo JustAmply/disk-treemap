@@ -111,6 +111,7 @@ Notes:
 | `ANALYZE_ROOT` | Yes | none | Absolute path that the UI is allowed to scan and browse |
 | `LISTEN_ADDR` | No | `:8080` | HTTP listen address inside the container |
 | `DATA_DIR` | No | `/data` | Directory where scan data is stored |
+| `SCAN_AUTOTUNE` | No | `true` | Dynamically adjusts scan concurrency during each scan |
 | `SCAN_TIMEOUT` | No | `0` | Maximum scan duration in seconds; `0` disables the timeout |
 | `MAX_CHILDREN_PER_QUERY` | No | `500` | Maximum number of direct child items returned for a folder view |
 
@@ -119,7 +120,8 @@ Notes:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCAN_MAX_CONCURRENCY` | `4` | Number of concurrent filesystem workers during a scan |
+| `SCAN_MIN_CONCURRENCY` | `1` | Lower bound for autotuned filesystem worker concurrency |
+| `SCAN_MAX_CONCURRENCY` | automatic, up to `64` | Fixed concurrency when autotune is disabled; upper bound when autotune is enabled |
 | `SCAN_WRITE_BATCH_SIZE` | `2048` | Batch size used when writing scan results to storage |
 | `SCAN_PROGRESS_INTERVAL_MS` | `200` | How often progress updates are emitted while a scan runs |
 
@@ -141,7 +143,9 @@ Notes:
 ### A scan takes too long
 
 - Large trees can take time with a filesystem walk
-- For trees with many small files, try increasing `SCAN_MAX_CONCURRENCY`; for very high item counts, `SCAN_WRITE_BATCH_SIZE` can also help
+- For trees with many small files, leave `SCAN_AUTOTUNE=true` and raise `SCAN_MAX_CONCURRENCY` if the host has fast storage and spare CPU
+- If you need deterministic scan behavior, set `SCAN_AUTOTUNE=false` and choose a fixed `SCAN_MAX_CONCURRENCY`
+- For very high item counts, increasing `SCAN_WRITE_BATCH_SIZE` can also help
 - Narrow the root path if you only care about one subtree
 - Set `SCAN_TIMEOUT` if you want long scans to stop automatically
 

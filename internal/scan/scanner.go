@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type NodeRecord struct {
@@ -36,15 +37,140 @@ type Engine interface {
 }
 
 type Scanner struct {
-	root           string
-	maxConcurrency int
+	root        string
+	fileLimiter *concurrencyLimiter
+	dirLimiter  *concurrencyLimiter
 }
 
 func New(root string, maxConcurrency int) *Scanner {
 	if maxConcurrency < 1 {
 		maxConcurrency = 1
 	}
-	return &Scanner{root: filepath.Clean(root), maxConcurrency: maxConcurrency}
+	s := &Scanner{root: filepath.Clean(root)}
+	if maxConcurrency > 1 {
+		s.fileLimiter = newConcurrencyLimiter(maxConcurrency, maxConcurrency)
+		s.dirLimiter = newConcurrencyLimiter(maxConcurrency-1, maxConcurrency-1)
+	}
+	return s
+}
+
+type ConcurrencyStats struct {
+	Limit int
+	InUse int
+	Max   int
+}
+
+type AdjustableConcurrency interface {
+	SetConcurrencyLimit(limit int) int
+	ConcurrencyStats() ConcurrencyStats
+}
+
+type concurrencyLimiter struct {
+	mu    sync.Mutex
+	limit int
+	inUse int
+	max   int
+}
+
+func newConcurrencyLimiter(limit, max int) *concurrencyLimiter {
+	if max < 0 {
+		max = 0
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > max {
+		limit = max
+	}
+	return &concurrencyLimiter{limit: limit, max: max}
+}
+
+func (l *concurrencyLimiter) Acquire(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		l.mu.Lock()
+		if l.inUse < l.limit {
+			l.inUse++
+			l.mu.Unlock()
+			return nil
+		}
+		l.mu.Unlock()
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (l *concurrencyLimiter) TryAcquire() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inUse >= l.limit {
+		return false
+	}
+	l.inUse++
+	return true
+}
+
+func (l *concurrencyLimiter) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.inUse > 0 {
+		l.inUse--
+	}
+}
+
+func (l *concurrencyLimiter) SetLimit(limit int) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > l.max {
+		limit = l.max
+	}
+	l.limit = limit
+	return l.limit
+}
+
+func (l *concurrencyLimiter) Stats() ConcurrencyStats {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return ConcurrencyStats{Limit: l.limit, InUse: l.inUse, Max: l.max}
+}
+
+func (s *Scanner) SetConcurrencyLimit(limit int) int {
+	if limit < 1 {
+		limit = 1
+	}
+	if s.fileLimiter == nil {
+		return 1
+	}
+	applied := s.fileLimiter.SetLimit(limit)
+	if s.dirLimiter != nil {
+		s.dirLimiter.SetLimit(applied - 1)
+	}
+	return applied
+}
+
+func (s *Scanner) ConcurrencyStats() ConcurrencyStats {
+	if s.fileLimiter == nil {
+		return ConcurrencyStats{Limit: 1, Max: 1}
+	}
+	fileStats := s.fileLimiter.Stats()
+	if s.dirLimiter != nil {
+		dirStats := s.dirLimiter.Stats()
+		fileStats.InUse += dirStats.InUse
+	}
+	return fileStats
 }
 
 func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
@@ -52,19 +178,12 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return Result{}, errors.New("node callback is required")
 	}
 
-	var dirSem chan struct{}
-	var fileSem chan struct{}
-	if s.maxConcurrency > 1 {
-		dirSem = make(chan struct{}, s.maxConcurrency-1)
-		fileSem = make(chan struct{}, s.maxConcurrency)
-	}
-
 	var nextNodeID int64
 	allocNodeID := func() int64 {
 		return atomic.AddInt64(&nextNodeID, 1)
 	}
 
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, nil, dirSem, fileSem, allocNodeID, cb)
+	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, nil, s.dirLimiter, s.fileLimiter, allocNodeID, cb)
 	if err != nil {
 		return Result{}, err
 	}
@@ -83,8 +202,8 @@ func (s *Scanner) scanNode(
 	hasParent bool,
 	entry fs.DirEntry,
 	knownInfo fs.FileInfo,
-	dirSem chan struct{},
-	fileSem chan struct{},
+	dirLimiter *concurrencyLimiter,
+	fileLimiter *concurrencyLimiter,
 	allocNodeID func() int64,
 	emit NodeCallback,
 ) (int64, int64, int64, error) {
@@ -184,10 +303,8 @@ func (s *Scanner) scanNode(
 			continue
 		}
 
-		if fileSem != nil && !childEntry.IsDir() {
-			select {
-			case fileSem <- struct{}{}:
-			case <-ctx.Done():
+		if fileLimiter != nil && !childEntry.IsDir() {
+			if err := fileLimiter.Acquire(ctx); err != nil {
 				apply(0, 0, 0, ctx.Err())
 				continue
 			}
@@ -195,10 +312,10 @@ func (s *Scanner) scanNode(
 			wg.Add(1)
 			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
+				defer fileLimiter.Release()
 
 				info, infoErr := e.Info()
 				if infoErr != nil {
-					<-fileSem
 					if isNonFatal(infoErr) {
 						log.Printf("scan warning: lstat %q: %v", p, infoErr)
 						apply(0, 0, 1, nil)
@@ -209,30 +326,25 @@ func (s *Scanner) scanNode(
 				}
 
 				if info.Mode()&os.ModeSymlink != 0 {
-					<-fileSem
 					return
 				}
 
 				if info.IsDir() {
-					<-fileSem
-					sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirSem, fileSem, allocNodeID, emit)
+					sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirLimiter, fileLimiter, allocNodeID, emit)
 					apply(sz, n, w, childErr)
 					return
 				}
 
-				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirSem, fileSem, allocNodeID, emit)
-				<-fileSem
+				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirLimiter, fileLimiter, allocNodeID, emit)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
 		}
 
 		spawned := false
-		if dirSem != nil {
-			select {
-			case dirSem <- struct{}{}:
+		if dirLimiter != nil {
+			if dirLimiter.TryAcquire() {
 				spawned = true
-			default:
 			}
 		}
 
@@ -240,14 +352,14 @@ func (s *Scanner) scanNode(
 			wg.Add(1)
 			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
-				defer func() { <-dirSem }()
-				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, nil, dirSem, fileSem, allocNodeID, emit)
+				defer dirLimiter.Release()
+				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, nil, dirLimiter, fileLimiter, allocNodeID, emit)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
 		}
 
-		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, nil, dirSem, fileSem, allocNodeID, emit)
+		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, nil, dirLimiter, fileLimiter, allocNodeID, emit)
 		apply(sz, n, w, childErr)
 	}
 

@@ -115,6 +115,80 @@ func TestScannerAllowsConcurrentCallbacks(t *testing.T) {
 	}
 }
 
+func TestScannerAllowsAdaptiveConcurrencyLimitChanges(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 24; i++ {
+		writeSizedFile(t, filepath.Join(root, fmt.Sprintf("file-%d.bin", i)), 1)
+	}
+
+	s := New(root, 8)
+	if got := s.SetConcurrencyLimit(1); got != 1 {
+		t.Fatalf("expected initial limit 1, got %d", got)
+	}
+
+	firstCallback := make(chan struct{})
+	releaseCallbacks := make(chan struct{})
+	done := make(chan error, 1)
+	var firstOnce sync.Once
+	var current int32
+	var maxSeen int32
+
+	go func() {
+		_, err := s.Scan(context.Background(), func(node NodeRecord) error {
+			if node.Kind != "file" {
+				return nil
+			}
+			firstOnce.Do(func() { close(firstCallback) })
+			n := atomic.AddInt32(&current, 1)
+			for {
+				m := atomic.LoadInt32(&maxSeen)
+				if n <= m {
+					break
+				}
+				if atomic.CompareAndSwapInt32(&maxSeen, m, n) {
+					break
+				}
+			}
+			<-releaseCallbacks
+			atomic.AddInt32(&current, -1)
+			return nil
+		})
+		done <- err
+	}()
+
+	select {
+	case <-firstCallback:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("scan did not reach first callback")
+	}
+
+	if got := s.SetConcurrencyLimit(4); got != 4 {
+		t.Fatalf("expected raised limit 4, got %d", got)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if atomic.LoadInt32(&maxSeen) >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(releaseCallbacks)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("scan did not finish")
+	}
+
+	if maxSeen < 2 {
+		t.Fatalf("expected adaptive limit change to allow concurrent callbacks, max=%d", maxSeen)
+	}
+}
+
 func TestScannerEmitsNodeAndParentIDs(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "dir")
