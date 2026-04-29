@@ -5,13 +5,14 @@ services:
     user: "0:0"
     environment:
       ANALYZE_ROOT: /scanroot
-      LISTEN_ADDR: :8080
-      DATA_DIR: /data
-      SCAN_AUTOTUNE: "true"
-      SCAN_MIN_CONCURRENCY: 1
-      SCAN_MAX_CONCURRENCY: 64
-      SCAN_TIMEOUT: 0
-      MAX_CHILDREN_PER_QUERY: 500
+      # Optional tuning overrides. Defaults are usually enough.
+      # LISTEN_ADDR: :8080
+      # DATA_DIR: /data
+      # SCAN_AUTOTUNE: "true"
+      # SCAN_MAX_CONCURRENCY: 64
+      # SCAN_MAX_WRITE_BATCH_SIZE: 32768
+      # SCAN_TIMEOUT: 0
+      # MAX_CHILDREN_PER_QUERY: 500
     volumes:
       - /host/path/to/analyze:/scanroot:ro
       - treemap-data:/data

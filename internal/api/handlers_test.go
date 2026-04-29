@@ -182,6 +182,7 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 
 	cfg := testConfig(root, dataDir)
 	cfg.ScanWriteBatchSize = 256
+	cfg.ScanMaxWriteBatch = 512
 	cfg.ScanProgressInterval = 125 * time.Millisecond
 
 	st := newTestStore(t, dataDir)
@@ -211,6 +212,8 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 
 	var payload struct {
 		ScanWriteBatchSize     int            `json:"scan_write_batch_size"`
+		ScanMinWriteBatchSize  int            `json:"scan_min_write_batch_size"`
+		ScanMaxWriteBatchSize  int            `json:"scan_max_write_batch_size"`
 		ScanProgressIntervalMS int            `json:"scan_progress_interval_ms"`
 		CurrentScan            *store.ScanRun `json:"current_scan"`
 		LatestCompletedScan    *store.ScanRun `json:"latest_completed_scan"`
@@ -221,6 +224,12 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 
 	if payload.ScanWriteBatchSize != 256 {
 		t.Fatalf("expected batch size 256, got %d", payload.ScanWriteBatchSize)
+	}
+	if payload.ScanMinWriteBatchSize != 1 {
+		t.Fatalf("expected min batch size 1, got %d", payload.ScanMinWriteBatchSize)
+	}
+	if payload.ScanMaxWriteBatchSize != 512 {
+		t.Fatalf("expected max batch size 512, got %d", payload.ScanMaxWriteBatchSize)
 	}
 	if payload.ScanProgressIntervalMS != 125 {
 		t.Fatalf("expected progress interval 125ms, got %d", payload.ScanProgressIntervalMS)
@@ -373,6 +382,8 @@ func testConfig(root, dataDir string) config.Config {
 		DataDir:              dataDir,
 		ScanMaxConcurrency:   2,
 		ScanWriteBatchSize:   8,
+		ScanMinWriteBatch:    1,
+		ScanMaxWriteBatch:    64,
 		ScanProgressInterval: 25 * time.Millisecond,
 		MaxChildrenPerQuery:  100,
 	}

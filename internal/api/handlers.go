@@ -70,6 +70,8 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"data_dir":                  h.cfg.DataDir,
 		"scan_max_concurrency":      h.cfg.ScanMaxConcurrency,
 		"scan_write_batch_size":     h.cfg.ScanWriteBatchSize,
+		"scan_min_write_batch_size": h.cfg.ScanMinWriteBatch,
+		"scan_max_write_batch_size": h.cfg.ScanMaxWriteBatch,
 		"scan_progress_interval_ms": int(h.cfg.ScanProgressInterval / time.Millisecond),
 		"scan_timeout_seconds":      int(h.cfg.ScanTimeout.Seconds()),
 		"max_children_per_query":    h.cfg.MaxChildrenPerQuery,

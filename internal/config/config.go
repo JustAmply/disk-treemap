@@ -17,6 +17,8 @@ const (
 	defaultScanAutotune        = true
 	defaultScanMinConcurrency  = 1
 	defaultScanWriteBatchSize  = 2048
+	defaultScanMinWriteBatch   = 1
+	defaultScanMaxWriteBatch   = 32768
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500
@@ -30,6 +32,8 @@ type Config struct {
 	ScanMinConcurrency   int
 	ScanMaxConcurrency   int
 	ScanWriteBatchSize   int
+	ScanMinWriteBatch    int
+	ScanMaxWriteBatch    int
 	ScanProgressInterval time.Duration
 	ScanTimeout          time.Duration
 	MaxChildrenPerQuery  int
@@ -44,6 +48,8 @@ func LoadFromEnv() (Config, error) {
 		ScanMinConcurrency:   defaultScanMinConcurrency,
 		ScanMaxConcurrency:   defaultScanMaxConcurrency(),
 		ScanWriteBatchSize:   defaultScanWriteBatchSize,
+		ScanMinWriteBatch:    defaultScanMinWriteBatch,
+		ScanMaxWriteBatch:    defaultScanMaxWriteBatch,
 		ScanProgressInterval: time.Duration(defaultScanProgressMS) * time.Millisecond,
 		MaxChildrenPerQuery:  defaultMaxChildrenPerQuery,
 	}
@@ -83,6 +89,28 @@ func LoadFromEnv() (Config, error) {
 	}
 	if cfg.ScanWriteBatchSize < 1 {
 		cfg.ScanWriteBatchSize = 1
+	}
+
+	cfg.ScanMinWriteBatch, err = parseIntEnv("SCAN_MIN_WRITE_BATCH_SIZE", defaultScanMinWriteBatch)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.ScanMinWriteBatch < 1 {
+		cfg.ScanMinWriteBatch = 1
+	}
+
+	cfg.ScanMaxWriteBatch, err = parseIntEnv("SCAN_MAX_WRITE_BATCH_SIZE", defaultScanMaxWriteBatch)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.ScanMaxWriteBatch < cfg.ScanMinWriteBatch {
+		cfg.ScanMaxWriteBatch = cfg.ScanMinWriteBatch
+	}
+	if cfg.ScanWriteBatchSize < cfg.ScanMinWriteBatch {
+		cfg.ScanWriteBatchSize = cfg.ScanMinWriteBatch
+	}
+	if cfg.ScanWriteBatchSize > cfg.ScanMaxWriteBatch {
+		cfg.ScanWriteBatchSize = cfg.ScanMaxWriteBatch
 	}
 
 	progressMS, err := parseIntEnv("SCAN_PROGRESS_INTERVAL_MS", defaultScanProgressMS)

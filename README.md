@@ -122,7 +122,9 @@ Notes:
 | --- | --- | --- |
 | `SCAN_MIN_CONCURRENCY` | `1` | Lower bound for autotuned filesystem worker concurrency |
 | `SCAN_MAX_CONCURRENCY` | automatic, up to `64` | Fixed concurrency when autotune is disabled; upper bound when autotune is enabled |
-| `SCAN_WRITE_BATCH_SIZE` | `2048` | Batch size used when writing scan results to storage |
+| `SCAN_WRITE_BATCH_SIZE` | `2048` | Initial batch size used when writing scan results to storage |
+| `SCAN_MIN_WRITE_BATCH_SIZE` | `1` | Lower bound for autotuned scan result write batches |
+| `SCAN_MAX_WRITE_BATCH_SIZE` | `32768` | Upper bound for autotuned scan result write batches |
 | `SCAN_PROGRESS_INTERVAL_MS` | `200` | How often progress updates are emitted while a scan runs |
 
 </details>
@@ -145,7 +147,7 @@ Notes:
 - Large trees can take time with a filesystem walk
 - For trees with many small files, leave `SCAN_AUTOTUNE=true` and raise `SCAN_MAX_CONCURRENCY` if the host has fast storage and spare CPU
 - If you need deterministic scan behavior, set `SCAN_AUTOTUNE=false` and choose a fixed `SCAN_MAX_CONCURRENCY`
-- For very high item counts, increasing `SCAN_WRITE_BATCH_SIZE` can also help
+- For very high item counts, leave write batch autotuning enabled and raise `SCAN_MAX_WRITE_BATCH_SIZE` if storage can handle larger SQLite insert batches
 - Narrow the root path if you only care about one subtree
 - Set `SCAN_TIMEOUT` if you want long scans to stop automatically
 

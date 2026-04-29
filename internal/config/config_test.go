@@ -25,6 +25,8 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	t.Setenv("SCAN_MIN_CONCURRENCY", "3")
 	t.Setenv("SCAN_MAX_CONCURRENCY", "8")
 	t.Setenv("SCAN_WRITE_BATCH_SIZE", "1024")
+	t.Setenv("SCAN_MIN_WRITE_BATCH_SIZE", "512")
+	t.Setenv("SCAN_MAX_WRITE_BATCH_SIZE", "4096")
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "350")
 	t.Setenv("SCAN_TIMEOUT", "15")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "321")
@@ -55,6 +57,12 @@ func TestLoadFromEnvParsesOptionalValues(t *testing.T) {
 	if cfg.ScanWriteBatchSize != 1024 {
 		t.Fatalf("unexpected write batch size: %d", cfg.ScanWriteBatchSize)
 	}
+	if cfg.ScanMinWriteBatch != 512 {
+		t.Fatalf("unexpected min write batch size: %d", cfg.ScanMinWriteBatch)
+	}
+	if cfg.ScanMaxWriteBatch != 4096 {
+		t.Fatalf("unexpected max write batch size: %d", cfg.ScanMaxWriteBatch)
+	}
 	if cfg.ScanProgressInterval != 350*time.Millisecond {
 		t.Fatalf("unexpected progress interval: %v", cfg.ScanProgressInterval)
 	}
@@ -75,6 +83,8 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	t.Setenv("SCAN_MIN_CONCURRENCY", "0")
 	t.Setenv("SCAN_MAX_CONCURRENCY", "0")
 	t.Setenv("SCAN_WRITE_BATCH_SIZE", "0")
+	t.Setenv("SCAN_MIN_WRITE_BATCH_SIZE", "0")
+	t.Setenv("SCAN_MAX_WRITE_BATCH_SIZE", "0")
 	t.Setenv("SCAN_PROGRESS_INTERVAL_MS", "1")
 	t.Setenv("MAX_CHILDREN_PER_QUERY", "0")
 
@@ -91,6 +101,12 @@ func TestLoadFromEnvNormalizesSmallValues(t *testing.T) {
 	}
 	if cfg.ScanWriteBatchSize != 1 {
 		t.Fatalf("expected write batch size to floor at 1, got %d", cfg.ScanWriteBatchSize)
+	}
+	if cfg.ScanMinWriteBatch != 1 {
+		t.Fatalf("expected min write batch size to floor at 1, got %d", cfg.ScanMinWriteBatch)
+	}
+	if cfg.ScanMaxWriteBatch != 1 {
+		t.Fatalf("expected max write batch size to clamp to min, got %d", cfg.ScanMaxWriteBatch)
 	}
 	if cfg.ScanProgressInterval != 10*time.Millisecond {
 		t.Fatalf("expected progress interval floor at 10ms, got %v", cfg.ScanProgressInterval)
@@ -118,6 +134,12 @@ func TestLoadFromEnvDefaultsAutotuneOn(t *testing.T) {
 	if cfg.ScanMaxConcurrency < 4 || cfg.ScanMaxConcurrency > 64 {
 		t.Fatalf("expected bounded automatic max concurrency, got %d", cfg.ScanMaxConcurrency)
 	}
+	if cfg.ScanMinWriteBatch != 1 {
+		t.Fatalf("unexpected min write batch size: %d", cfg.ScanMinWriteBatch)
+	}
+	if cfg.ScanMaxWriteBatch != 32768 {
+		t.Fatalf("unexpected max write batch size: %d", cfg.ScanMaxWriteBatch)
+	}
 }
 
 func TestLoadFromEnvClampsMaxToMinConcurrency(t *testing.T) {
@@ -136,5 +158,28 @@ func TestLoadFromEnvClampsMaxToMinConcurrency(t *testing.T) {
 	}
 	if cfg.ScanMaxConcurrency != 6 {
 		t.Fatalf("expected max concurrency to clamp to min, got %d", cfg.ScanMaxConcurrency)
+	}
+}
+
+func TestLoadFromEnvClampsWriteBatchBounds(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ANALYZE_ROOT", root)
+	t.Setenv("SCAN_WRITE_BATCH_SIZE", "99")
+	t.Setenv("SCAN_MIN_WRITE_BATCH_SIZE", "128")
+	t.Setenv("SCAN_MAX_WRITE_BATCH_SIZE", "64")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if cfg.ScanMinWriteBatch != 128 {
+		t.Fatalf("unexpected min write batch size: %d", cfg.ScanMinWriteBatch)
+	}
+	if cfg.ScanMaxWriteBatch != 128 {
+		t.Fatalf("expected max write batch size to clamp to min, got %d", cfg.ScanMaxWriteBatch)
+	}
+	if cfg.ScanWriteBatchSize != 128 {
+		t.Fatalf("expected initial write batch size to clamp to min, got %d", cfg.ScanWriteBatchSize)
 	}
 }
