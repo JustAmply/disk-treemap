@@ -241,6 +241,52 @@ func (s *Store) CompleteScan(ctx context.Context, scanID int64, status string, f
 	return nil
 }
 
+func (s *Store) FailInterruptedScans(ctx context.Context, finishedAt time.Time) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM scan_runs WHERE status IN ('queued', 'running') ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("select interrupted scans: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan interrupted id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate interrupted scans: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	finished := finishedAt.UTC().Format(time.RFC3339Nano)
+	message := "scan interrupted before completion; start a new scan"
+	for start := 0; start < len(ids); start += sqliteMaxBindParameters {
+		end := start + sqliteMaxBindParameters
+		if end > len(ids) {
+			end = len(ids)
+		}
+
+		chunk := ids[start:end]
+		query := `UPDATE scan_runs SET status='failed', finished_at=?, error=? WHERE id IN (` + strings.Join(makePlaceholders(len(chunk)), ",") + `)`
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, finished, message)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+
+		if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+			return nil, fmt.Errorf("fail interrupted scans: %w", err)
+		}
+	}
+
+	return ids, nil
+}
+
 func (s *Store) BeginNodeWriter(ctx context.Context, scanID int64) (*NodeWriter, error) {
 	_ = scanID
 	tx, err := s.db.BeginTx(ctx, nil)

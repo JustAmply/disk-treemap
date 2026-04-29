@@ -34,6 +34,11 @@ func main() {
 	if err := st.Init(context.Background()); err != nil {
 		log.Fatalf("init store: %v", err)
 	}
+	if interrupted, err := st.FailInterruptedScans(context.Background(), time.Now().UTC()); err != nil {
+		log.Fatalf("recover interrupted scans: %v", err)
+	} else if len(interrupted) > 0 {
+		log.Printf("marked %d interrupted scan run(s) as failed on startup", len(interrupted))
+	}
 	if deleted, err := st.PruneOperationalScans(context.Background()); err != nil {
 		log.Fatalf("prune operational scans: %v", err)
 	} else if len(deleted) > 0 {

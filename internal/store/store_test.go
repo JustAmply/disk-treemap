@@ -380,6 +380,59 @@ func TestPruneOperationalScansKeepsLatestAndLatestCompleted(t *testing.T) {
 	}
 }
 
+func TestFailInterruptedScansMarksQueuedAndRunningAsFailed(t *testing.T) {
+	st := newTestStore(t)
+
+	completedID := insertCompletedScan(t, st, "/scanroot", []Node{
+		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
+	})
+
+	queuedID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create queued run: %v", err)
+	}
+	runningID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	if err != nil {
+		t.Fatalf("create running run: %v", err)
+	}
+	if err := st.MarkScanRunning(context.Background(), runningID, time.Now().UTC()); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	finishedAt := time.Now().UTC()
+	interrupted, err := st.FailInterruptedScans(context.Background(), finishedAt)
+	if err != nil {
+		t.Fatalf("fail interrupted scans: %v", err)
+	}
+	if len(interrupted) != 2 || interrupted[0] != queuedID || interrupted[1] != runningID {
+		t.Fatalf("unexpected interrupted ids: %v", interrupted)
+	}
+
+	for _, scanID := range []int64{queuedID, runningID} {
+		run, err := st.GetScanRun(context.Background(), scanID)
+		if err != nil {
+			t.Fatalf("get scan %d: %v", scanID, err)
+		}
+		if run.Status != "failed" {
+			t.Fatalf("expected scan %d failed, got %s", scanID, run.Status)
+		}
+		if run.FinishedAt == nil {
+			t.Fatalf("expected scan %d to have a finish time", scanID)
+		}
+		if !strings.Contains(run.Error, "interrupted") {
+			t.Fatalf("expected interrupted error for scan %d, got %q", scanID, run.Error)
+		}
+	}
+
+	completed, err := st.GetLatestCompletedScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get latest completed scan: %v", err)
+	}
+	if completed == nil || completed.ID != completedID {
+		t.Fatalf("expected completed scan %d to remain latest completed, got %+v", completedID, completed)
+	}
+}
+
 func TestListLargestInPathWithOptionsSupportsSort(t *testing.T) {
 	st := newTestStore(t)
 	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
