@@ -78,7 +78,24 @@
     applyFiltersFromInputs().catch((err) => showAlert(`Could not apply filters: ${err.message}`));
   }, 220);
 
+  function logDebug(message, details) {
+    if (details === undefined) {
+      console.log(`[disk-treemap] ${message}`);
+      return;
+    }
+    console.log(`[disk-treemap] ${message}`, details);
+  }
+
+  function logWarn(message, details) {
+    if (details === undefined) {
+      console.warn(`[disk-treemap] ${message}`);
+      return;
+    }
+    console.warn(`[disk-treemap] ${message}`, details);
+  }
+
   init().catch((err) => {
+    logWarn("app initialization failed", { error: err.message });
     state.alert = {
       message: `Unable to load the app: ${err.message}`,
       retry: false,
@@ -105,11 +122,19 @@
       minSize: state.urlState.minSize || 0,
       sort: state.urlState.sort || defaultFilters.sort,
     };
+    logDebug("config loaded", {
+      root: cfg.analyze_root,
+      currentScan: state.currentScan ? { id: state.currentScan.id, status: state.currentScan.status } : null,
+      latestCompletedScan: state.latestCompletedScan
+        ? { id: state.latestCompletedScan.id, status: state.latestCompletedScan.status }
+        : null,
+    });
 
     syncFilterInputs();
     renderAll();
 
     if (App.isScanActive(state.currentScan)) {
+      logDebug("resuming scan polling from config", { scanId: state.currentScan.id, status: state.currentScan.status });
       startPolling(state.currentScan.id);
     }
 
@@ -455,9 +480,14 @@
 
   async function runScan() {
     if (App.isScanActive(state.currentScan)) {
+      logDebug("ignored scan request because a scan is already active", {
+        scanId: state.currentScan?.id,
+        status: state.currentScan?.status,
+      });
       return;
     }
 
+    logDebug("requesting new scan", { root: state.config?.analyze_root || null });
     clearPolling();
     abortViewLoad();
     state.alert = null;
@@ -471,6 +501,7 @@
 
     try {
       const result = await App.apiPost("/api/v1/scans");
+      logDebug("scan accepted", { scanId: result.scan_id });
       state.currentScan = {
         id: result.scan_id,
         status: "queued",
@@ -481,6 +512,7 @@
       startPolling(result.scan_id);
       syncUrlState();
     } catch (err) {
+      logWarn("scan start failed", { error: err.message });
       state.currentScan = {
         ...state.currentScan,
         status: "failed",
@@ -493,6 +525,7 @@
 
   async function openViewScan(scanId, { preservePath = false, fallbackOnMissing = false } = {}) {
     try {
+      logDebug("opening scan", { scanId, preservePath, fallbackOnMissing });
       const selected = await App.apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
       state.viewedScanId = scanId;
 
@@ -519,6 +552,7 @@
       if (!fallbackOnMissing) {
         throw err;
       }
+      logWarn("could not open requested scan", { scanId, error: err.message });
 
       const fallbackScanId = state.latestCompletedScan?.id && state.latestCompletedScan.id !== scanId
         ? state.latestCompletedScan.id
@@ -535,18 +569,44 @@
   }
 
   function startPolling(scanId) {
+    logDebug("starting scan polling", { scanId });
     disableScanButtons(true);
     clearPolling();
+    let lastLoggedStatus = null;
+    let lastLoggedNodes = -1;
 
     const poll = async () => {
       try {
         const scan = await App.apiGet(`/api/v1/scans/${scanId}`);
         state.currentScan = scan;
+        const scannedNodes = scan.progress?.scanned_nodes ?? 0;
+        const shouldLogProgress =
+          scan.status !== lastLoggedStatus ||
+          lastLoggedNodes < 0 ||
+          scannedNodes - lastLoggedNodes >= 1000;
+        if (shouldLogProgress) {
+          logDebug("scan poll update", {
+            scanId,
+            status: scan.status,
+            scannedNodes,
+            scannedBytes: scan.progress?.scanned_bytes ?? 0,
+            currentPath: scan.progress?.current_path || null,
+            warnings: scan.warning_count || 0,
+          });
+          lastLoggedStatus = scan.status;
+          lastLoggedNodes = scannedNodes;
+        }
         renderAll();
 
         if (scan.status === "completed") {
           clearPolling();
           disableScanButtons(false);
+          logDebug("scan completed", {
+            scanId,
+            totalNodes: scan.total_nodes,
+            totalBytes: scan.total_bytes,
+            warnings: scan.warning_count || 0,
+          });
           App.logScanWarnings(scan);
           state.latestCompletedScan = scan;
           state.viewedScanId = scan.id;
@@ -558,6 +618,7 @@
         if (scan.status === "failed") {
           clearPolling();
           disableScanButtons(false);
+          logWarn("scan failed", { scanId, error: scan.error || "unknown error" });
           showAlert(`Scan failed: ${scan.error || "unknown error"}`, true);
           renderAll();
           return;
@@ -567,6 +628,7 @@
       } catch (err) {
         clearPolling();
         disableScanButtons(false);
+        logWarn("scan polling failed", { scanId, error: err.message });
         showAlert(`Lost connection while polling scan progress: ${err.message}`, true);
       }
     };
@@ -574,6 +636,7 @@
     poll().catch((err) => {
       clearPolling();
       disableScanButtons(false);
+      logWarn("scan polling loop failed", { scanId, error: err.message });
       showAlert(`Could not poll scan progress: ${err.message}`, true);
     });
   }
@@ -590,6 +653,7 @@
 
   async function loadPath(path) {
     if (!state.viewedScanId) {
+      logDebug("skipped path load because no scan is selected", { path });
       return;
     }
 
@@ -600,6 +664,7 @@
     state.detailScrollTop = 0;
     state.alert = null;
     renderAll();
+    logDebug("loading path view", { scanId: state.viewedScanId, path });
 
     const controller = new AbortController();
     state.viewAbortController = controller;
@@ -626,13 +691,21 @@
       state.currentPath = response.path;
       state.activeItem = chooseNextActiveItem(response, state.activeItem?.path);
       state.pathLoading = false;
+      logDebug("path view loaded", {
+        scanId: state.viewedScanId,
+        path: response.path,
+        returnedItems: response.summary?.returned_item_count ?? 0,
+        matchingItems: response.summary?.matching_item_count ?? 0,
+      });
       renderAll();
       syncUrlState();
     } catch (err) {
       if (err.name === "AbortError") {
+        logDebug("path view load aborted", { scanId: state.viewedScanId, path });
         return;
       }
       state.pathLoading = false;
+      logWarn("path view load failed", { scanId: state.viewedScanId, path, error: err.message });
       renderAll();
       throw err;
     } finally {

@@ -148,6 +148,7 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 		log.Printf("scan #%d prune warning: %v", scanID, err)
 	}
 
+	log.Printf("scan #%d queued: root=%q concurrency=%d batch_size=%d", scanID, s.cfg.AnalyzeRoot, s.cfg.ScanMaxConcurrency, s.scanWriteBatchSize())
 	go s.runScan(scanID)
 	return scanID, nil
 }
@@ -158,6 +159,7 @@ func (s *Service) runScan(scanID int64) {
 		s.finishFailure(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
 		return
 	}
+	log.Printf("scan #%d running", scanID)
 
 	scanCtxBase, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
@@ -268,6 +270,7 @@ func (s *Service) runScan(scanID int64) {
 		s.finishFailure(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
+	log.Printf("scan #%d committed node batch: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 
 	if err := s.store.CompleteScan(ctx, scanID, "completed", time.Now().UTC(), result.TotalBytes, result.TotalNodes, result.WarningCount, ""); err != nil {
 		s.finishFailure(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
