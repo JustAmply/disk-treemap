@@ -45,6 +45,26 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+  docker-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 10
