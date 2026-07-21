@@ -305,6 +305,100 @@ func TestExploreEndpointReturnsSummaryAndItems(t *testing.T) {
 	}
 }
 
+func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+	dirPath := filepath.Join(root, "nested")
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatalf("create fixture directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "root.bin"), []byte("abc"), 0o644); err != nil {
+		t.Fatalf("create root fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dirPath, "nested.bin"), []byte("12345"), 0o644); err != nil {
+		t.Fatalf("create nested fixture: %v", err)
+	}
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/v1/scans", nil)
+	startRec := httptest.NewRecorder()
+	mux.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start scan: expected 202, got %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	var started struct {
+		ScanID int64 `json:"scan_id"`
+	}
+	if err := json.Unmarshal(startRec.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode start response: %v", err)
+	}
+	if started.ScanID == 0 {
+		t.Fatal("start response did not include a scan id")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+strconv.FormatInt(started.ScanID, 10), nil)
+		statusRec := httptest.NewRecorder()
+		mux.ServeHTTP(statusRec, statusReq)
+		if statusRec.Code != http.StatusOK {
+			t.Fatalf("get scan status: expected 200, got %d: %s", statusRec.Code, statusRec.Body.String())
+		}
+
+		var run store.ScanRun
+		if err := json.Unmarshal(statusRec.Body.Bytes(), &run); err != nil {
+			t.Fatalf("decode scan status: %v", err)
+		}
+		if run.Status == "completed" {
+			break
+		}
+		if run.Status == "failed" {
+			t.Fatalf("scan failed: %s", run.Error)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("scan did not complete before timeout; last status=%q", run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	explorePath := "/api/v1/scans/" + strconv.FormatInt(started.ScanID, 10) + "/explore?path=" + url.QueryEscape(root)
+	exploreReq := httptest.NewRequest(http.MethodGet, explorePath, nil)
+	exploreRec := httptest.NewRecorder()
+	mux.ServeHTTP(exploreRec, exploreReq)
+	if exploreRec.Code != http.StatusOK {
+		t.Fatalf("explore completed scan: expected 200, got %d: %s", exploreRec.Code, exploreRec.Body.String())
+	}
+
+	var explored struct {
+		Summary struct {
+			TotalBytes        int64 `json:"total_bytes"`
+			MatchingItemCount int64 `json:"matching_item_count"`
+		} `json:"summary"`
+		Items []store.Node `json:"items"`
+	}
+	if err := json.Unmarshal(exploreRec.Body.Bytes(), &explored); err != nil {
+		t.Fatalf("decode explore response: %v", err)
+	}
+	if explored.Summary.TotalBytes != 8 || explored.Summary.MatchingItemCount != 2 {
+		t.Fatalf("unexpected explore summary: %+v", explored.Summary)
+	}
+
+	sizes := make(map[string]int64, len(explored.Items))
+	for _, item := range explored.Items {
+		sizes[item.Name] = item.SizeBytes
+	}
+	if sizes["root.bin"] != 3 || sizes["nested"] != 5 {
+		t.Fatalf("unexpected scanned items: %+v", explored.Items)
+	}
+}
+
 func TestDeleteScanEndpointRemoved(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
