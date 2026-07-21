@@ -53,6 +53,16 @@ docker run --rm \
 
 Then open [http://localhost:8080](http://localhost:8080).
 
+## Development checks
+
+Use the Go version declared in `go.mod`. On PowerShell, run the complete local feedback loop with:
+
+```powershell
+./scripts/check.ps1
+```
+
+The script checks Go formatting, runs `go vet`, and executes the full test suite. It keeps Go caches and telemetry state in ignored workspace directories so the same command also works in restricted development environments.
+
 ## What It Does
 
 - Runs on-demand scans instead of continuous background indexing

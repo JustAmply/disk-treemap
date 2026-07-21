@@ -26,9 +26,22 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.2'
+          go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files are not formatted:"
+            echo "$unformatted"
+            echo "Fix them with: gofmt -w ./cmd ./internal"
+            exit 1
+          fi
+
+      - name: Run vet
+        run: go vet ./...
       - name: Run tests
         run: go test ./...
 

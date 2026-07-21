@@ -1,3 +1,4 @@
 .gocache/
 .gopath/
+.appdata/
 docker-compose.dev.yaml
