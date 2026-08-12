@@ -15,3 +15,9 @@ _Avoid_: Scan data, result set
 **Folder View**:
 A bounded view of one directory inside a Scan Snapshot, including its visible contents and size summary.
 _Avoid_: Explore result, children response
+
+## Folder View boundaries
+
+- The server owns path validation, filters, result limits, summaries, and the maximum treemap expansion budget.
+- The browser may group small nodes after layout according to the current viewport. This presentation-only grouping must not change the server summary.
+- `/children` and `/largest` remain compatibility endpoints. They use the same path and filter rules as the Folder View.

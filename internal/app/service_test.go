@@ -494,11 +494,12 @@ func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
 	}
 }
 
-func TestGetExploreReturnsCompactTreeAndHiddenBucket(t *testing.T) {
+func TestGetFolderViewReturnsBoundedTreeAndHiddenBucket(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
 	cfg := testConfig(root, dataDir)
+	cfg.MaxChildrenPerQuery = 2
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
 	if err != nil {
@@ -521,31 +522,32 @@ func TestGetExploreReturnsCompactTreeAndHiddenBucket(t *testing.T) {
 
 	svc := NewService(cfg, st)
 
-	explore, err := svc.GetExplore(context.Background(), scanID, root, NodeQueryOptions{
-		Limit: 2,
+	view, err := svc.GetFolderView(context.Background(), scanID, FolderViewRequest{
+		Path:  root,
+		Limit: 999,
 		Sort:  "size_desc",
 	})
 	if err != nil {
 		t.Fatalf("get explore: %v", err)
 	}
 
-	if len(explore.Items) != 2 {
-		t.Fatalf("expected 2 visible items, got %d", len(explore.Items))
+	if len(view.Items) != 2 {
+		t.Fatalf("expected 2 visible items, got %d", len(view.Items))
 	}
-	if explore.Summary.HiddenItemCount != 1 {
-		t.Fatalf("expected 1 hidden item, got %d", explore.Summary.HiddenItemCount)
+	if view.Summary.HiddenItemCount != 1 {
+		t.Fatalf("expected 1 hidden item, got %d", view.Summary.HiddenItemCount)
 	}
-	if !explore.Summary.IsResultTruncated {
+	if !view.Summary.IsResultTruncated {
 		t.Fatalf("expected truncated summary")
 	}
-	if len(explore.Treemap.Children) != 3 {
-		t.Fatalf("expected 3 root treemap children, got %d", len(explore.Treemap.Children))
+	if len(view.Treemap.Children) != 3 {
+		t.Fatalf("expected 3 root treemap children, got %d", len(view.Treemap.Children))
 	}
 
-	var docs *ExploreTreemapNode
-	var hidden *ExploreTreemapNode
-	for i := range explore.Treemap.Children {
-		node := &explore.Treemap.Children[i]
+	var docs *FolderViewTreemapNode
+	var hidden *FolderViewTreemapNode
+	for i := range view.Treemap.Children {
+		node := &view.Treemap.Children[i]
 		if node.Path == dirPath {
 			docs = node
 		}
@@ -565,15 +567,57 @@ func TestGetExploreReturnsCompactTreeAndHiddenBucket(t *testing.T) {
 	}
 }
 
-func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
-	_, err := normalizeNodeQueryOptions(NodeQueryOptions{Kind: "wat"}, 10, "size_desc")
+func TestFolderViewTreemapEnforcesServerNodeBudget(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	items := make([]store.Node, 260)
+	for i := range items {
+		items[i] = store.Node{
+			Path:      filepath.Join(root, fmt.Sprintf("file-%03d.bin", i)),
+			Name:      fmt.Sprintf("file-%03d.bin", i),
+			Kind:      "file",
+			SizeBytes: 1,
+		}
+	}
+
+	view := &folderView{}
+	tree, err := view.buildTreemap(context.Background(), 1, store.Node{
+		Path:      root,
+		Name:      filepath.Base(root),
+		Kind:      "dir",
+		SizeBytes: int64(len(items)),
+	}, items, store.ChildAggregate{Count: int64(len(items)), TotalBytes: int64(len(items))}, false)
+	if err != nil {
+		t.Fatalf("build bounded treemap: %v", err)
+	}
+	if len(tree.Children) != folderViewDescendantBudget {
+		t.Fatalf("expected %d treemap children, got %d", folderViewDescendantBudget, len(tree.Children))
+	}
+	hidden := tree.Children[len(tree.Children)-1]
+	if !hidden.Synthetic || hidden.HiddenItemCount != 21 {
+		t.Fatalf("expected 21 grouped items at budget boundary, got %+v", hidden)
+	}
+}
+
+func TestFolderViewNormalizesLimitsAndRejectsInvalidFilters(t *testing.T) {
+	root := t.TempDir()
+	view := newFolderView(root, 10, nil)
+
+	_, err := view.normalize(FolderViewRequest{Path: root, Kind: "wat"}, 10, 10)
 	if err == nil {
 		t.Fatalf("expected error for invalid type")
 	}
 
-	_, err = normalizeNodeQueryOptions(NodeQueryOptions{Sort: "wat"}, 10, "size_desc")
+	_, err = view.normalize(FolderViewRequest{Path: root, Sort: "wat"}, 10, 10)
 	if err == nil {
 		t.Fatalf("expected error for invalid sort")
+	}
+
+	normalized, err := view.normalize(FolderViewRequest{Path: root, Limit: 999}, 2, 2)
+	if err != nil {
+		t.Fatalf("normalize bounded request: %v", err)
+	}
+	if normalized.Limit != 2 || normalized.Sort != "size_desc" {
+		t.Fatalf("unexpected normalized request: %+v", normalized)
 	}
 }
 

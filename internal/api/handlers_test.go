@@ -150,7 +150,7 @@ func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
 	}
 }
 
-func TestChildrenRejectsPathOutsideRoot(t *testing.T) {
+func TestFolderViewEndpointsRejectPathOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -166,14 +166,68 @@ func TestChildrenRejectsPathOutsideRoot(t *testing.T) {
 	h.Register(mux)
 
 	outside := filepath.Clean(filepath.Join(root, ".."))
-	endpoint := "/api/v1/scans/" + strconv.FormatInt(scanID, 10) + "/children?path=" + url.QueryEscape(outside)
-	req := httptest.NewRequest(http.MethodGet, endpoint, nil)
-	rec := httptest.NewRecorder()
+	for _, endpointName := range []string{"children", "explore", "largest"} {
+		t.Run(endpointName, func(t *testing.T) {
+			endpoint := "/api/v1/scans/" + strconv.FormatInt(scanID, 10) + "/" + endpointName + "?path=" + url.QueryEscape(outside)
+			req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+			rec := httptest.NewRecorder()
 
-	mux.ServeHTTP(rec, req)
+			mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestCompatibilityFolderEndpointsRemainAvailable(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+	dirPath := filepath.Join(root, "nested")
+	deepFilePath := filepath.Join(dirPath, "deep.bin")
+
+	cfg := testConfig(root, dataDir)
+	st := newTestStore(t, dataDir)
+	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 100, MtimeUnix: 1},
+		{Path: dirPath, ParentPath: root, Name: "nested", Kind: "dir", SizeBytes: 60, MtimeUnix: 1},
+		{Path: deepFilePath, ParentPath: dirPath, Name: "deep.bin", Kind: "file", SizeBytes: 60, MtimeUnix: 1},
+		{Path: filepath.Join(root, "root.bin"), ParentPath: root, Name: "root.bin", Kind: "file", SizeBytes: 40, MtimeUnix: 1},
+	})
+
+	svc := app.NewService(cfg, st)
+	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
+	mux := http.NewServeMux()
+	h.Register(mux)
+	baseURL := "/api/v1/scans/" + strconv.FormatInt(scanID, 10)
+
+	childrenReq := httptest.NewRequest(http.MethodGet, baseURL+"/children?path="+url.QueryEscape(root)+"&type=file&limit=1", nil)
+	childrenRec := httptest.NewRecorder()
+	mux.ServeHTTP(childrenRec, childrenReq)
+	if childrenRec.Code != http.StatusOK {
+		t.Fatalf("children: expected 200, got %d: %s", childrenRec.Code, childrenRec.Body.String())
+	}
+	var children app.ChildrenResponse
+	if err := json.Unmarshal(childrenRec.Body.Bytes(), &children); err != nil {
+		t.Fatalf("decode children: %v", err)
+	}
+	if children.Path != root || len(children.Children) != 1 || children.Children[0].Name != "root.bin" {
+		t.Fatalf("unexpected children response: %+v", children)
+	}
+
+	largestReq := httptest.NewRequest(http.MethodGet, baseURL+"/largest?path="+url.QueryEscape(root)+"&type=file&limit=1", nil)
+	largestRec := httptest.NewRecorder()
+	mux.ServeHTTP(largestRec, largestReq)
+	if largestRec.Code != http.StatusOK {
+		t.Fatalf("largest: expected 200, got %d: %s", largestRec.Code, largestRec.Body.String())
+	}
+	var largest app.LargestResponse
+	if err := json.Unmarshal(largestRec.Body.Bytes(), &largest); err != nil {
+		t.Fatalf("decode largest: %v", err)
+	}
+	if largest.Path != root || len(largest.Items) != 1 || largest.Items[0].Path != deepFilePath {
+		t.Fatalf("unexpected largest response: %+v", largest)
 	}
 }
 
