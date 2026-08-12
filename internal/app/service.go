@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 
 const (
 	minProgressInterval         = 10 * time.Millisecond
-	storageOptimizeTimeout      = 30 * time.Second
 	exploreExpandedDirLimit     = 12
 	exploreBranchLimit          = 14
 	exploreTreemapNodeBudget    = 240
@@ -31,27 +29,6 @@ var (
 )
 
 type scannerFactory func(root string, maxConcurrency int) scan.Engine
-
-type liveProgress struct {
-	ScanID       int64
-	CurrentPath  string
-	ScannedNodes int64
-	ScannedFiles int64
-	ScannedDirs  int64
-	ScannedBytes int64
-	UpdatedAt    time.Time
-}
-
-type scanRuntimeMetrics struct {
-	ScanID            int64
-	EnqueuedNodes     int64
-	WriterQueueDepth  int
-	WriterQueueCap    int
-	WriteBatchSize    int
-	LastFlushDuration time.Duration
-	LastFlushAt       time.Time
-	FlushCount        int64
-}
 
 type batchSizeController struct {
 	current int64
@@ -89,14 +66,10 @@ func (b *batchSizeController) Set(size int) int {
 }
 
 type Service struct {
-	cfg           config.Config
-	store         *store.Store
-	makeScanner   scannerFactory
-	mu            sync.Mutex
-	running       bool
-	runningScanID int64
-	progress      liveProgress
-	metrics       scanRuntimeMetrics
+	cfg         config.Config
+	store       *store.Store
+	runs        *scanRunLifecycle
+	makeScanner scannerFactory
 }
 
 type NodeQueryOptions struct {
@@ -156,6 +129,7 @@ func NewService(cfg config.Config, st *store.Store) *Service {
 	return &Service{
 		cfg:         cfg,
 		store:       st,
+		runs:        newScanRunLifecycle(st),
 		makeScanner: func(root string, maxConcurrency int) scan.Engine { return scan.New(root, maxConcurrency) },
 	}
 }
@@ -168,29 +142,9 @@ func (s *Service) SetScannerFactoryForTests(factory scannerFactory) {
 }
 
 func (s *Service) StartScan(ctx context.Context) (int64, error) {
-	s.mu.Lock()
-	if s.running {
-		s.mu.Unlock()
-		return 0, ErrScanRunning
-	}
-
-	scanID, err := s.store.CreateScanRun(ctx, s.cfg.AnalyzeRoot)
+	scanID, err := s.runs.queue(ctx, s.cfg.AnalyzeRoot)
 	if err != nil {
-		s.mu.Unlock()
 		return 0, err
-	}
-	s.running = true
-	s.runningScanID = scanID
-	s.progress = liveProgress{
-		ScanID:      scanID,
-		CurrentPath: s.cfg.AnalyzeRoot,
-		UpdatedAt:   time.Now().UTC(),
-	}
-	s.metrics = scanRuntimeMetrics{ScanID: scanID}
-	s.mu.Unlock()
-
-	if _, err := s.store.PruneOperationalScans(context.Background()); err != nil {
-		log.Printf("scan #%d prune warning: %v", scanID, err)
 	}
 
 	limits := scancontrol.New(s.cfg.ScanProfile).Limits()
@@ -211,8 +165,8 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 
 func (s *Service) runScan(scanID int64) {
 	ctx := context.Background()
-	if err := s.store.MarkScanRunning(ctx, scanID, time.Now().UTC()); err != nil {
-		s.finishFailure(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
+	if err := s.runs.start(ctx, scanID); err != nil {
+		s.runs.fail(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
 		return
 	}
 	log.Printf("scan #%d running", scanID)
@@ -234,7 +188,7 @@ func (s *Service) runScan(scanID int64) {
 
 	writer, err := s.store.BeginSnapshot(scanCtx, scanID)
 	if err != nil {
-		s.finishFailure(scanID, fmt.Errorf("open node writer: %w", err), 0, 0, 0)
+		s.runs.fail(scanID, fmt.Errorf("open node writer: %w", err), 0, 0, 0)
 		return
 	}
 
@@ -251,7 +205,7 @@ func (s *Service) runScan(scanID int64) {
 	nodeCh := make(chan store.Node, queueSize)
 	writerErrCh := make(chan error, 1)
 
-	s.recordWriteBatchSize(scanID, batchController.Get())
+	s.runs.recordWriteBatchSize(scanID, batchController.Get())
 	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchController, progressInterval)
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, limits.Max.Concurrency)
@@ -261,7 +215,7 @@ func (s *Service) runScan(scanID int64) {
 		applied := tuner.SetConcurrencyLimit(limits.Initial.Concurrency)
 		if limits.Adaptive {
 			log.Printf("scan #%d adaptive control enabled: profile=%s initial_concurrency=%d max_concurrency=%d", scanID, s.cfg.ScanProfile, applied, limits.Max.Concurrency)
-			target := &scanTuningTarget{service: s, scanID: scanID, tuner: tuner, batchController: batchController}
+			target := &scanTuningTarget{runs: s.runs, scanID: scanID, tuner: tuner, batchController: batchController}
 			go controller.Run(autotuneCtx, target, func(event scancontrol.Event) { logScanControlEvent(scanID, event) })
 		} else {
 			log.Printf("scan #%d fixed control: concurrency=%d batch_size=%d", scanID, applied, batchController.Get())
@@ -281,7 +235,7 @@ func (s *Service) runScan(scanID int64) {
 		case <-scanCtx.Done():
 			return scanCtx.Err()
 		case nodeCh <- storedNode:
-			s.recordNodeEnqueued(scanID, len(nodeCh), cap(nodeCh))
+			s.runs.recordNodeEnqueued(scanID, len(nodeCh), cap(nodeCh))
 			return nil
 		}
 	})
@@ -297,34 +251,26 @@ func (s *Service) runScan(scanID int64) {
 	if scanErr != nil {
 		_ = writer.Discard()
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, scanErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
-		s.finishFailure(scanID, scanErr, 0, 0, result.WarningCount)
+		s.runs.fail(scanID, scanErr, 0, 0, result.WarningCount)
 		return
 	}
 	if writerErr != nil {
 		_ = writer.Discard()
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, writerErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
-		s.finishFailure(scanID, fmt.Errorf("write nodes: %w", writerErr), 0, 0, result.WarningCount)
+		s.runs.fail(scanID, fmt.Errorf("write nodes: %w", writerErr), 0, 0, result.WarningCount)
 		return
 	}
 
 	commitStarted := time.Now()
 	if err := writer.Publish(); err != nil {
-		s.finishFailure(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
+		s.runs.fail(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
 	log.Printf("scan #%d committed staged nodes: nodes=%d bytes=%d warnings=%d duration=%s", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount, time.Since(commitStarted))
 
-	if err := s.store.CompleteScan(ctx, scanID, "completed", time.Now().UTC(), result.TotalBytes, result.TotalNodes, result.WarningCount, ""); err != nil {
-		s.finishFailure(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
+	if err := s.runs.complete(scanID, result); err != nil {
+		s.runs.fail(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
-	}
-
-	s.clearRunning(scanID)
-	s.pruneOperationalScans(scanID)
-	optimizeCtx, optimizeCancel := context.WithTimeout(context.Background(), storageOptimizeTimeout)
-	defer optimizeCancel()
-	if err := s.store.OptimizeStorage(optimizeCtx, false); err != nil {
-		log.Printf("scan #%d storage optimize warning: %v", scanID, err)
 	}
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
 }
@@ -350,8 +296,8 @@ func (s *Service) runNodeWriter(
 		if err := writer.Write(ctx, batch); err != nil {
 			return err
 		}
-		s.recordWriterFlush(scanID, time.Since(started))
-		s.recordProgressBatch(scanID, batch, now)
+		s.runs.recordWriterFlush(scanID, time.Since(started))
+		s.runs.recordProgressBatch(scanID, batch, now)
 		batch = batch[:0]
 		return nil
 	}
@@ -359,14 +305,14 @@ func (s *Service) runNodeWriter(
 	for {
 		select {
 		case node, ok := <-nodeCh:
-			s.recordWriterQueue(scanID, len(nodeCh), cap(nodeCh))
+			s.runs.recordWriterQueue(scanID, len(nodeCh), cap(nodeCh))
 			if !ok {
 				writerErrCh <- flush(time.Now().UTC())
 				return
 			}
 			batch = append(batch, node)
 			currentBatchSize := batchController.Get()
-			s.recordWriteBatchSize(scanID, currentBatchSize)
+			s.runs.recordWriteBatchSize(scanID, currentBatchSize)
 			if len(batch) >= currentBatchSize {
 				if err := flush(time.Now().UTC()); err != nil {
 					writerErrCh <- err
@@ -385,101 +331,23 @@ func (s *Service) runNodeWriter(
 	}
 }
 
-func (s *Service) recordProgressBatch(scanID int64, batch []store.Node, updatedAt time.Time) {
-	var nodes int64
-	var files int64
-	var dirs int64
-	var bytes int64
-
-	for _, item := range batch {
-		node := item
-		nodes++
-		switch node.Kind {
-		case "file":
-			files++
-			bytes += node.SizeBytes
-		case "dir":
-			dirs++
-		}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.running || s.runningScanID != scanID || s.progress.ScanID != scanID {
-		return
-	}
-
-	s.progress.CurrentPath = batch[len(batch)-1].Path
-	s.progress.ScannedNodes += nodes
-	s.progress.ScannedFiles += files
-	s.progress.ScannedDirs += dirs
-	s.progress.ScannedBytes += bytes
-	s.progress.UpdatedAt = updatedAt
-}
-
-func (s *Service) recordWriterQueue(scanID int64, depth, capacity int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.running || s.runningScanID != scanID || s.metrics.ScanID != scanID {
-		return
-	}
-	s.metrics.WriterQueueDepth = depth
-	s.metrics.WriterQueueCap = capacity
-}
-
-func (s *Service) recordNodeEnqueued(scanID int64, depth, capacity int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.running || s.runningScanID != scanID || s.metrics.ScanID != scanID {
-		return
-	}
-	s.metrics.EnqueuedNodes++
-	s.metrics.WriterQueueDepth = depth
-	s.metrics.WriterQueueCap = capacity
-}
-
-func (s *Service) recordWriterFlush(scanID int64, duration time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.running || s.runningScanID != scanID || s.metrics.ScanID != scanID {
-		return
-	}
-	s.metrics.LastFlushDuration = duration
-	s.metrics.LastFlushAt = time.Now().UTC()
-	s.metrics.FlushCount++
-}
-
-func (s *Service) recordWriteBatchSize(scanID int64, size int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.running || s.runningScanID != scanID || s.metrics.ScanID != scanID {
-		return
-	}
-	s.metrics.WriteBatchSize = size
-}
-
 type scanTuningTarget struct {
-	service         *Service
+	runs            *scanRunLifecycle
 	scanID          int64
 	tuner           scan.AdjustableConcurrency
 	batchController *batchSizeController
 }
 
 func (t *scanTuningTarget) Snapshot() scancontrol.Snapshot {
-	t.service.mu.Lock()
-	defer t.service.mu.Unlock()
-
-	if !t.service.running ||
-		t.service.runningScanID != t.scanID ||
-		t.service.progress.ScanID != t.scanID ||
-		t.service.metrics.ScanID != t.scanID {
+	runtime := t.runs.runtimeSnapshot(t.scanID)
+	if !runtime.Active {
 		return scancontrol.Snapshot{}
 	}
 
 	stats := t.tuner.ConcurrencyStats()
 	var occupancy float64
-	if t.service.metrics.WriterQueueCap > 0 {
-		occupancy = float64(t.service.metrics.WriterQueueDepth) / float64(t.service.metrics.WriterQueueCap)
+	if runtime.Metrics.WriterQueueCap > 0 {
+		occupancy = float64(runtime.Metrics.WriterQueueDepth) / float64(runtime.Metrics.WriterQueueCap)
 	}
 
 	return scancontrol.Snapshot{
@@ -488,12 +356,12 @@ func (t *scanTuningTarget) Snapshot() scancontrol.Snapshot {
 			Concurrency: stats.Limit,
 			BatchSize:   t.batchController.Get(),
 		},
-		EnqueuedNodes:     t.service.metrics.EnqueuedNodes,
-		WrittenNodes:      t.service.progress.ScannedNodes,
+		EnqueuedNodes:     runtime.Metrics.EnqueuedNodes,
+		WrittenNodes:      runtime.Progress.ScannedNodes,
 		QueueOccupancy:    occupancy,
-		LastFlushDuration: t.service.metrics.LastFlushDuration,
-		LastFlushAt:       t.service.metrics.LastFlushAt,
-		FlushCount:        t.service.metrics.FlushCount,
+		LastFlushDuration: runtime.Metrics.LastFlushDuration,
+		LastFlushAt:       runtime.Metrics.LastFlushAt,
+		FlushCount:        runtime.Metrics.FlushCount,
 		InUse:             stats.InUse,
 	}
 }
@@ -501,7 +369,7 @@ func (t *scanTuningTarget) Snapshot() scancontrol.Snapshot {
 func (t *scanTuningTarget) Apply(settings scancontrol.Settings) scancontrol.Settings {
 	settings.Concurrency = t.tuner.SetConcurrencyLimit(settings.Concurrency)
 	settings.BatchSize = t.batchController.Set(settings.BatchSize)
-	t.service.recordWriteBatchSize(t.scanID, settings.BatchSize)
+	t.runs.recordWriteBatchSize(t.scanID, settings.BatchSize)
 	return settings
 }
 
@@ -554,77 +422,20 @@ func (s *Service) scanProgressInterval() time.Duration {
 	return s.cfg.ScanProgressInterval
 }
 
-func (s *Service) finishFailure(scanID int64, scanErr error, totalBytes, totalNodes, warnings int64) {
-	_ = s.store.CompleteScan(context.Background(), scanID, "failed", time.Now().UTC(), totalBytes, totalNodes, warnings, scanErr.Error())
-	s.clearRunning(scanID)
-	s.pruneOperationalScans(scanID)
-}
-
-func (s *Service) clearRunning(scanID int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running && s.runningScanID == scanID {
-		s.running = false
-		s.runningScanID = 0
-		s.progress = liveProgress{}
-		s.metrics = scanRuntimeMetrics{}
-	}
-}
-
-func (s *Service) pruneOperationalScans(scanID int64) {
-	deleted, err := s.store.PruneOperationalScans(context.Background())
-	if err != nil {
-		log.Printf("scan #%d prune warning: %v", scanID, err)
-		return
-	}
-	if len(deleted) > 0 {
-		log.Printf("scan #%d pruned %d old scan run(s)", scanID, len(deleted))
-	}
-}
-
 func (s *Service) GetScanRun(ctx context.Context, scanID int64) (store.ScanRun, error) {
-	run, err := s.store.GetScanRun(ctx, scanID)
-	if err != nil {
-		return store.ScanRun{}, err
-	}
-	if progress := s.snapshotProgress(scanID); progress != nil {
-		run.Progress = progress
-	}
-	return run, nil
+	return s.runs.get(ctx, scanID)
 }
 
 func (s *Service) GetCurrentScanRun(ctx context.Context) (*store.ScanRun, error) {
-	run, err := s.store.GetLatestScanRun(ctx)
-	if err != nil || run == nil {
-		return run, err
-	}
-	if progress := s.snapshotProgress(run.ID); progress != nil {
-		run.Progress = progress
-	}
-	return run, nil
+	return s.runs.current(ctx)
 }
 
 func (s *Service) GetLatestCompletedScanRun(ctx context.Context) (*store.ScanRun, error) {
-	return s.store.GetLatestCompletedScanRun(ctx)
+	return s.runs.latestSnapshot(ctx)
 }
 
-func (s *Service) snapshotProgress(scanID int64) *store.ScanProgress {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.running || s.runningScanID != scanID || s.progress.ScanID != scanID {
-		return nil
-	}
-
-	updated := s.progress.UpdatedAt
-	return &store.ScanProgress{
-		CurrentPath:  s.progress.CurrentPath,
-		ScannedNodes: s.progress.ScannedNodes,
-		ScannedFiles: s.progress.ScannedFiles,
-		ScannedDirs:  s.progress.ScannedDirs,
-		ScannedBytes: s.progress.ScannedBytes,
-		UpdatedAt:    &updated,
-	}
+func (s *Service) Recover(ctx context.Context) (RecoveryReport, error) {
+	return s.runs.recover(ctx)
 }
 
 func (s *Service) GetChildren(ctx context.Context, scanID int64, requestedPath string, opts NodeQueryOptions) (ChildrenResponse, error) {

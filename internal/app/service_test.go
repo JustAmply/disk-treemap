@@ -439,6 +439,61 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 	}
 }
 
+func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	completedID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+		{Path: root, Name: filepath.Base(root), Kind: "dir", SizeBytes: 1},
+	})
+	queuedID, err := st.QueueRun(context.Background(), root)
+	if err != nil {
+		t.Fatalf("queue interrupted run: %v", err)
+	}
+	runningID, err := st.QueueRun(context.Background(), root)
+	if err != nil {
+		t.Fatalf("queue running run: %v", err)
+	}
+	if err := st.StartRun(context.Background(), runningID, time.Now().UTC()); err != nil {
+		t.Fatalf("start running run: %v", err)
+	}
+
+	svc := NewService(testConfig(root, dataDir), st)
+	report, err := svc.Recover(context.Background())
+	if err != nil {
+		t.Fatalf("recover service: %v", err)
+	}
+	if report.InterruptedRuns != 2 || report.PrunedRuns != 1 {
+		t.Fatalf("unexpected recovery report: %+v", report)
+	}
+
+	if _, err := st.GetScanRun(context.Background(), queuedID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected older interrupted run to be pruned, got %v", err)
+	}
+	running, err := st.GetScanRun(context.Background(), runningID)
+	if err != nil {
+		t.Fatalf("get latest interrupted run: %v", err)
+	}
+	if running.Status != store.ScanFailed || !strings.Contains(running.Error, "interrupted") {
+		t.Fatalf("expected latest interrupted run to be failed, got %+v", running)
+	}
+	completed, err := st.GetScanRun(context.Background(), completedID)
+	if err != nil {
+		t.Fatalf("get retained snapshot: %v", err)
+	}
+	if completed.Status != store.ScanCompleted {
+		t.Fatalf("expected completed snapshot to remain, got %s", completed.Status)
+	}
+}
+
 func TestGetExploreReturnsCompactTreeAndHiddenBucket(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
@@ -565,11 +620,11 @@ func waitForScanStatusViaService(t *testing.T, svc *Service, scanID int64) store
 func createCompletedScanWithNodesForServiceTest(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {
 	t.Helper()
 
-	scanID, err := st.CreateScanRun(context.Background(), root)
+	scanID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 
@@ -584,7 +639,11 @@ func createCompletedScanWithNodesForServiceTest(t *testing.T, st *store.Store, r
 	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit writer: %v", err)
 	}
-	if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), 0, int64(len(nodes)), 0, ""); err != nil {
+	if err := st.FinishRun(context.Background(), scanID, store.ScanOutcome{
+		Status:     store.ScanCompleted,
+		FinishedAt: time.Now().UTC(),
+		TotalNodes: int64(len(nodes)),
+	}); err != nil {
 		t.Fatalf("complete scan: %v", err)
 	}
 	return scanID

@@ -34,21 +34,19 @@ func main() {
 	if err := st.Init(context.Background()); err != nil {
 		log.Fatalf("init store: %v", err)
 	}
-	if interrupted, err := st.FailInterruptedScans(context.Background(), time.Now().UTC()); err != nil {
-		log.Fatalf("recover interrupted scans: %v", err)
-	} else if len(interrupted) > 0 {
-		log.Printf("marked %d interrupted scan run(s) as failed on startup", len(interrupted))
-	}
-	if deleted, err := st.PruneOperationalScans(context.Background()); err != nil {
-		log.Fatalf("prune operational scans: %v", err)
-	} else if len(deleted) > 0 {
-		log.Printf("pruned %d old scan run(s) on startup", len(deleted))
-		if err := st.OptimizeStorage(context.Background(), false); err != nil {
-			log.Printf("storage optimize warning: %v", err)
-		}
-	}
 
 	svc := app.NewService(cfg, st)
+	recovery, err := svc.Recover(context.Background())
+	if err != nil {
+		log.Fatalf("recover scan runs: %v", err)
+	}
+	if recovery.InterruptedRuns > 0 {
+		log.Printf("marked %d interrupted scan run(s) as failed on startup", recovery.InterruptedRuns)
+	}
+	if recovery.PrunedRuns > 0 {
+		log.Printf("pruned %d old scan run(s) on startup", recovery.PrunedRuns)
+	}
+
 	handler := api.NewHandler(svc, cfg, "web")
 
 	mux := http.NewServeMux()

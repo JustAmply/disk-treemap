@@ -167,7 +167,7 @@ func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
 func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
 	st := newTestStore(t)
 
-	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	scanID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
@@ -200,10 +200,48 @@ func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
 	}
 }
 
+func TestRunTransitionsRejectInvalidOrder(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	scanID, err := st.QueueRun(ctx, "/scanroot")
+	if err != nil {
+		t.Fatalf("queue run: %v", err)
+	}
+
+	completed := ScanOutcome{Status: ScanCompleted, FinishedAt: time.Now().UTC()}
+	if err := st.FinishRun(ctx, scanID, completed); !errors.Is(err, ErrInvalidScanTransition) {
+		t.Fatalf("expected queued-to-completed transition error, got %v", err)
+	}
+	if err := st.StartRun(ctx, scanID, time.Now().UTC()); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := st.StartRun(ctx, scanID, time.Now().UTC()); !errors.Is(err, ErrInvalidScanTransition) {
+		t.Fatalf("expected duplicate start transition error, got %v", err)
+	}
+	if err := st.FinishRun(ctx, scanID, completed); err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	if err := st.FinishRun(ctx, scanID, ScanOutcome{Status: ScanFailed, FinishedAt: time.Now().UTC()}); !errors.Is(err, ErrInvalidScanTransition) {
+		t.Fatalf("expected completed-to-failed transition error, got %v", err)
+	}
+	if err := st.FinishRun(ctx, scanID, ScanOutcome{Status: ScanRunning, FinishedAt: time.Now().UTC()}); err == nil {
+		t.Fatalf("expected non-terminal outcome error")
+	}
+
+	run, err := st.GetScanRun(ctx, scanID)
+	if err != nil {
+		t.Fatalf("get completed run: %v", err)
+	}
+	if run.Status != ScanCompleted {
+		t.Fatalf("expected completed run to remain completed, got %s", run.Status)
+	}
+}
+
 func TestSnapshotWriterSupportsParentInLaterBatch(t *testing.T) {
 	st := newTestStore(t)
 
-	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	scanID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
@@ -241,7 +279,7 @@ func TestSnapshotWriterSupportsParentInLaterBatch(t *testing.T) {
 func TestSnapshotWriterRejectsMissingParentOnPublish(t *testing.T) {
 	st := newTestStore(t)
 
-	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	scanID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
@@ -267,7 +305,7 @@ func TestSnapshotWriterRejectsMissingParentOnPublish(t *testing.T) {
 func TestSnapshotWriterChunksBeyondSQLiteParameterLimit(t *testing.T) {
 	st := newTestStore(t)
 
-	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	scanID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
@@ -377,11 +415,19 @@ func TestInitDiscardsOnlyRunsBackedByLegacyNodes(t *testing.T) {
 		{Path: filepath.Join(root, "current.bin"), ParentPath: root, Name: "current.bin", Kind: "file", SizeBytes: 20},
 	})
 
-	legacyID, err := st.CreateScanRun(context.Background(), root)
+	legacyID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		t.Fatalf("create legacy run metadata: %v", err)
 	}
-	if err := st.CompleteScan(context.Background(), legacyID, "completed", time.Now().UTC(), 10, 1, 0, ""); err != nil {
+	if err := st.StartRun(context.Background(), legacyID, time.Now().UTC()); err != nil {
+		t.Fatalf("start legacy run metadata: %v", err)
+	}
+	if err := st.FinishRun(context.Background(), legacyID, ScanOutcome{
+		Status:     ScanCompleted,
+		FinishedAt: time.Now().UTC(),
+		TotalBytes: 10,
+		TotalNodes: 1,
+	}); err != nil {
 		t.Fatalf("complete legacy run metadata: %v", err)
 	}
 	if _, err := st.db.ExecContext(context.Background(), `
@@ -426,14 +472,19 @@ func TestPruneOperationalScansKeepsLatestAndLatestCompleted(t *testing.T) {
 	latestCompleted := insertCompletedScan(t, st, "/scanroot", []Node{
 		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 20},
 	})
-	failedID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	failedID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create failed run: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), failedID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), failedID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
-	if err := st.CompleteScan(context.Background(), failedID, "failed", time.Now().UTC(), 0, 0, 1, "boom"); err != nil {
+	if err := st.FinishRun(context.Background(), failedID, ScanOutcome{
+		Status:       ScanFailed,
+		FinishedAt:   time.Now().UTC(),
+		WarningCount: 1,
+		Error:        "boom",
+	}); err != nil {
 		t.Fatalf("complete failed run: %v", err)
 	}
 
@@ -469,15 +520,15 @@ func TestFailInterruptedScansMarksQueuedAndRunningAsFailed(t *testing.T) {
 		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
 	})
 
-	queuedID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	queuedID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create queued run: %v", err)
 	}
-	runningID, err := st.CreateScanRun(context.Background(), "/scanroot")
+	runningID, err := st.QueueRun(context.Background(), "/scanroot")
 	if err != nil {
 		t.Fatalf("create running run: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), runningID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), runningID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 
@@ -565,11 +616,11 @@ func BenchmarkListLargestInPath(b *testing.B) {
 
 func insertCompletedScan(t *testing.T, st *Store, root string, nodes []Node) int64 {
 	t.Helper()
-	scanID, err := st.CreateScanRun(context.Background(), root)
+	scanID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 	writer, err := st.BeginSnapshot(context.Background(), scanID)
@@ -587,7 +638,12 @@ func insertCompletedScan(t *testing.T, st *Store, root string, nodes []Node) int
 	for _, n := range nodes {
 		total += n.SizeBytes
 	}
-	if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), total, int64(len(nodes)), 0, ""); err != nil {
+	if err := st.FinishRun(context.Background(), scanID, ScanOutcome{
+		Status:     ScanCompleted,
+		FinishedAt: time.Now().UTC(),
+		TotalBytes: total,
+		TotalNodes: int64(len(nodes)),
+	}); err != nil {
 		t.Fatalf("complete scan: %v", err)
 	}
 	return scanID
@@ -629,11 +685,11 @@ func newTestStoreForBenchmark(b *testing.B) *Store {
 
 func insertCompletedScanBenchmark(b *testing.B, st *Store, root string, nodes []Node) int64 {
 	b.Helper()
-	scanID, err := st.CreateScanRun(context.Background(), root)
+	scanID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		b.Fatalf("create scan: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
 		b.Fatalf("mark running: %v", err)
 	}
 	writer, err := st.BeginSnapshot(context.Background(), scanID)
@@ -648,7 +704,11 @@ func insertCompletedScanBenchmark(b *testing.B, st *Store, root string, nodes []
 		b.Fatalf("commit nodes: %v", err)
 	}
 
-	if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), 0, int64(len(nodes)), 0, ""); err != nil {
+	if err := st.FinishRun(context.Background(), scanID, ScanOutcome{
+		Status:     ScanCompleted,
+		FinishedAt: time.Now().UTC(),
+		TotalNodes: int64(len(nodes)),
+	}); err != nil {
 		b.Fatalf("complete scan: %v", err)
 	}
 	return scanID

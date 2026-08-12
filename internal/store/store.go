@@ -26,11 +26,20 @@ type Store struct {
 	db *sql.DB
 }
 
+type ScanStatus string
+
+const (
+	ScanQueued    ScanStatus = "queued"
+	ScanRunning   ScanStatus = "running"
+	ScanCompleted ScanStatus = "completed"
+	ScanFailed    ScanStatus = "failed"
+)
+
 type ScanRun struct {
 	ID           int64         `json:"id"`
 	StartedAt    *time.Time    `json:"started_at,omitempty"`
 	FinishedAt   *time.Time    `json:"finished_at,omitempty"`
-	Status       string        `json:"status"`
+	Status       ScanStatus    `json:"status"`
 	Error        string        `json:"error,omitempty"`
 	RootPath     string        `json:"root_path"`
 	TotalBytes   int64         `json:"total_bytes"`
@@ -46,6 +55,15 @@ type ScanProgress struct {
 	ScannedDirs  int64      `json:"scanned_dirs"`
 	ScannedBytes int64      `json:"scanned_bytes"`
 	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
+}
+
+type ScanOutcome struct {
+	Status       ScanStatus
+	FinishedAt   time.Time
+	TotalBytes   int64
+	TotalNodes   int64
+	WarningCount int64
+	Error        string
 }
 
 type Node struct {
@@ -227,8 +245,8 @@ func (s *Store) discardLegacyRuns(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) CreateScanRun(ctx context.Context, rootPath string) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO scan_runs(status, root_path) VALUES('queued', ?)`, rootPath)
+func (s *Store) QueueRun(ctx context.Context, rootPath string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO scan_runs(status, root_path) VALUES(?, ?)`, ScanQueued, rootPath)
 	if err != nil {
 		return 0, fmt.Errorf("insert scan run: %w", err)
 	}
@@ -239,22 +257,46 @@ func (s *Store) CreateScanRun(ctx context.Context, rootPath string) (int64, erro
 	return id, nil
 }
 
-func (s *Store) MarkScanRunning(ctx context.Context, scanID int64, startedAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE scan_runs SET status='running', started_at=? WHERE id=?`, startedAt.UTC().Format(time.RFC3339Nano), scanID)
+func (s *Store) StartRun(ctx context.Context, scanID int64, startedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE scan_runs
+		SET status=?, started_at=?
+		WHERE id=? AND status=?
+	`, ScanRunning, startedAt.UTC().Format(time.RFC3339Nano), scanID, ScanQueued)
 	if err != nil {
 		return fmt.Errorf("mark running: %w", err)
 	}
-	return nil
+	return requireTransition(result, scanID, string(ScanQueued), string(ScanRunning))
 }
 
-func (s *Store) CompleteScan(ctx context.Context, scanID int64, status string, finishedAt time.Time, totalBytes, totalNodes, warningCount int64, errorMessage string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *Store) FinishRun(ctx context.Context, scanID int64, outcome ScanOutcome) error {
+	if outcome.Status != ScanCompleted && outcome.Status != ScanFailed {
+		return fmt.Errorf("finish scan: invalid terminal status %q", outcome.Status)
+	}
+	allowedStatus := ScanRunning
+	expectedStatus := string(ScanRunning)
+	if outcome.Status == ScanFailed {
+		allowedStatus = ScanQueued
+		expectedStatus = "queued or running"
+	}
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE scan_runs
 		SET status=?, finished_at=?, total_bytes=?, total_nodes=?, warning_count=?, error=?
-		WHERE id=?
-	`, status, finishedAt.UTC().Format(time.RFC3339Nano), totalBytes, totalNodes, warningCount, errorMessage, scanID)
+		WHERE id=? AND (status=? OR (?=? AND status=?))
+	`, outcome.Status, outcome.FinishedAt.UTC().Format(time.RFC3339Nano), outcome.TotalBytes, outcome.TotalNodes, outcome.WarningCount, outcome.Error, scanID, allowedStatus, outcome.Status, ScanFailed, ScanRunning)
 	if err != nil {
 		return fmt.Errorf("complete scan: %w", err)
+	}
+	return requireTransition(result, scanID, expectedStatus, string(outcome.Status))
+}
+
+func requireTransition(result sql.Result, scanID int64, from, to string) error {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check scan transition: %w", err)
+	}
+	if changed != 1 {
+		return fmt.Errorf("%w: scan %d from %s to %s", ErrInvalidScanTransition, scanID, from, to)
 	}
 	return nil
 }
@@ -482,10 +524,10 @@ func (s *Store) GetLatestScanRun(ctx context.Context) (*ScanRun, error) {
 }
 
 func (s *Store) GetLatestCompletedScanRun(ctx context.Context) (*ScanRun, error) {
-	return s.getLatestScanRun(ctx, "completed")
+	return s.getLatestScanRun(ctx, ScanCompleted)
 }
 
-func (s *Store) getLatestScanRun(ctx context.Context, status string) (*ScanRun, error) {
+func (s *Store) getLatestScanRun(ctx context.Context, status ScanStatus) (*ScanRun, error) {
 	query := `
 		SELECT id, started_at, finished_at, status, error, root_path, total_bytes, total_nodes, warning_count
 		FROM scan_runs
@@ -1027,4 +1069,7 @@ func makePlaceholders(n int) []string {
 	return items
 }
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound              = errors.New("not found")
+	ErrInvalidScanTransition = errors.New("invalid scan transition")
+)

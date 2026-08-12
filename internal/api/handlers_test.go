@@ -189,11 +189,11 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 	completedID := createCompletedScanWithNodes(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 12, MtimeUnix: time.Now().Unix()},
 	})
-	currentID, err := st.CreateScanRun(context.Background(), root)
+	currentID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		t.Fatalf("create running scan: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), currentID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), currentID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 
@@ -489,11 +489,11 @@ func newTestStore(t *testing.T, dataDir string) *store.Store {
 
 func createCompletedScanWithNodes(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {
 	t.Helper()
-	scanID, err := st.CreateScanRun(context.Background(), root)
+	scanID, err := st.QueueRun(context.Background(), root)
 	if err != nil {
 		t.Fatalf("create scan: %v", err)
 	}
-	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
+	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 
@@ -508,7 +508,11 @@ func createCompletedScanWithNodes(t *testing.T, st *store.Store, root string, no
 	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), 0, int64(len(nodes)), 0, ""); err != nil {
+	if err := st.FinishRun(context.Background(), scanID, store.ScanOutcome{
+		Status:     store.ScanCompleted,
+		FinishedAt: time.Now().UTC(),
+		TotalNodes: int64(len(nodes)),
+	}); err != nil {
 		t.Fatalf("complete scan: %v", err)
 	}
 	return scanID
