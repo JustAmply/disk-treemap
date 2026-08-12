@@ -121,21 +121,25 @@ Notes:
 | `ANALYZE_ROOT` | Yes | none | Absolute path that the UI is allowed to scan and browse |
 | `LISTEN_ADDR` | No | `:8080` | HTTP listen address inside the container |
 | `DATA_DIR` | No | `/data` | Directory where scan data is stored |
-| `SCAN_AUTOTUNE` | No | `true` | Dynamically adjusts scan concurrency during each scan |
+| `SCAN_PROFILE` | No | `balanced` | Scan control profile: `balanced`, `throughput`, `low-impact`, or `fixed` |
 | `SCAN_TIMEOUT` | No | `0` | Maximum scan duration in seconds; `0` disables the timeout |
 | `MAX_CHILDREN_PER_QUERY` | No | `500` | Maximum number of direct child items returned for a folder view |
 
 <details>
-<summary>Advanced tuning</summary>
+<summary>Scan profiles and advanced tuning</summary>
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SCAN_MIN_CONCURRENCY` | `1` | Lower bound for autotuned filesystem worker concurrency |
-| `SCAN_MAX_CONCURRENCY` | automatic, up to `64` | Fixed concurrency when autotune is disabled; upper bound when autotune is enabled |
-| `SCAN_WRITE_BATCH_SIZE` | `2048` | Initial batch size used when writing scan results to storage |
-| `SCAN_MIN_WRITE_BATCH_SIZE` | `1` | Lower bound for autotuned scan result write batches |
-| `SCAN_MAX_WRITE_BATCH_SIZE` | `8192` | Upper bound for autotuned scan result write batches |
 | `SCAN_PROGRESS_INTERVAL_MS` | `200` | How often progress updates are emitted while a scan runs |
+
+The profiles set filesystem concurrency and SQLite write-batch limits as one coherent policy:
+
+- `balanced`: adaptive control for stable throughput on typical hosts
+- `throughput`: higher limits for fast storage
+- `low-impact`: lower limits for shared or resource-constrained hosts
+- `fixed`: stable, non-adaptive concurrency and batch size
+
+The former `SCAN_AUTOTUNE`, `SCAN_MIN_CONCURRENCY`, `SCAN_MAX_CONCURRENCY`, `SCAN_WRITE_BATCH_SIZE`, `SCAN_MIN_WRITE_BATCH_SIZE`, and `SCAN_MAX_WRITE_BATCH_SIZE` variables are no longer accepted. Replace them with `SCAN_PROFILE`.
 
 </details>
 
@@ -155,9 +159,9 @@ Notes:
 ### A scan takes too long
 
 - Large trees can take time with a filesystem walk
-- For trees with many small files, leave `SCAN_AUTOTUNE=true` and raise `SCAN_MAX_CONCURRENCY` if the host has fast storage and spare CPU
-- If you need deterministic scan behavior, set `SCAN_AUTOTUNE=false` and choose a fixed `SCAN_MAX_CONCURRENCY`
-- For very high item counts, leave write batch autotuning enabled and raise `SCAN_MAX_WRITE_BATCH_SIZE` if storage can handle larger SQLite insert batches
+- For trees with many small files and fast storage, use `SCAN_PROFILE=throughput`
+- If you need stable non-adaptive behavior, use `SCAN_PROFILE=fixed`
+- On shared or resource-constrained hosts, use `SCAN_PROFILE=low-impact`
 - Narrow the root path if you only care about one subtree
 - Set `SCAN_TIMEOUT` if you want long scans to stop automatically
 

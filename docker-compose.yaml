@@ -8,9 +8,7 @@ services:
       # Optional tuning overrides. Defaults are usually enough.
       # LISTEN_ADDR: :8080
       # DATA_DIR: /data
-      # SCAN_AUTOTUNE: "true"
-      # SCAN_MAX_CONCURRENCY: 64
-      # SCAN_MAX_WRITE_BATCH_SIZE: 8192
+      # SCAN_PROFILE: balanced
       # SCAN_TIMEOUT: 0
       # MAX_CHILDREN_PER_QUERY: 500
     volumes:

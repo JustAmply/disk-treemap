@@ -11,6 +11,7 @@ import (
 
 	"github.com/justamply/disk-treemap/internal/config"
 	"github.com/justamply/disk-treemap/internal/scan"
+	"github.com/justamply/disk-treemap/internal/scancontrol"
 	"github.com/justamply/disk-treemap/internal/store"
 )
 
@@ -199,7 +200,6 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 	filePath := filepath.Join(root, "example.bin")
 
 	cfg := testConfig(root, dataDir)
-	cfg.ScanWriteBatchSize = 1
 	cfg.ScanProgressInterval = 10 * time.Millisecond
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
@@ -303,7 +303,6 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	dataDir := t.TempDir()
 
 	cfg := testConfig(root, dataDir)
-	cfg.ScanWriteBatchSize = 16
 	cfg.ScanProgressInterval = 10 * time.Millisecond
 
 	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
@@ -523,205 +522,11 @@ func TestNormalizeNodeQueryOptionsRejectsInvalidTypeAndSort(t *testing.T) {
 	}
 }
 
-func TestNextAutotuneLimitIncreasesWhenThroughputHealthy(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            8,
-		PreviousNodesSec: 100,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.20, WriteBatchSize: 2048}, 110, 1, 32, 1, 32768)
-
-	if next.Limit <= state.Limit {
-		t.Fatalf("expected concurrency increase, got %d from %d", next.Limit, state.Limit)
-	}
-	if next.LastAction != "increase" {
-		t.Fatalf("expected increase action, got %q", next.LastAction)
-	}
-}
-
-func TestNextAutotuneLimitDoesNotIncreaseBeforeThroughputExists(t *testing.T) {
-	state := scanAutotuneState{
-		Limit: 8,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.20, WriteBatchSize: 2048}, 0, 1, 32, 1, 32768)
-
-	if next.Limit != state.Limit {
-		t.Fatalf("expected concurrency to hold without throughput, got %d from %d", next.Limit, state.Limit)
-	}
-	if next.LastAction != "hold" {
-		t.Fatalf("expected hold action, got %q", next.LastAction)
-	}
-}
-
-func TestNextAutotuneLimitDecreasesWhenQueueSaturated(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            8,
-		PreviousNodesSec: 100,
-		FullQueueSamples: 1,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.95, WriteBatchSize: 2048}, 100, 1, 32, 1, 32768)
-
-	if next.Limit >= state.Limit {
-		t.Fatalf("expected concurrency decrease, got %d from %d", next.Limit, state.Limit)
-	}
-	if next.LastAction != "decrease" {
-		t.Fatalf("expected decrease action, got %q", next.LastAction)
-	}
-}
-
-func TestNextAutotuneLimitHoldsAfterDecrease(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            6,
-		PreviousNodesSec: 100,
-		LastAction:       "decrease",
-		HoldSamples:      1,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{QueueOccupancy: 0.10, WriteBatchSize: 2048}, 120, 1, 32, 1, 32768)
-
-	if next.Limit != state.Limit {
-		t.Fatalf("expected hold after decrease, got %d from %d", next.Limit, state.Limit)
-	}
-	if next.HoldSamples != 0 {
-		t.Fatalf("expected hold sample to be consumed, got %d", next.HoldSamples)
-	}
-}
-
-func TestNextAutotuneLimitDecreasesWhenFlushLatencyRises(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:                 8,
-		PreviousNodesSec:      100,
-		PreviousFlushDuration: 50 * time.Millisecond,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{
-		QueueOccupancy:    0.80,
-		WriteBatchSize:    2048,
-		LastFlushDuration: 150 * time.Millisecond,
-		HadFlush:          true,
-	}, 100, 1, 32, 1, 32768)
-
-	if next.Limit >= state.Limit {
-		t.Fatalf("expected concurrency decrease, got %d from %d", next.Limit, state.Limit)
-	}
-	if next.LastAction != "decrease" {
-		t.Fatalf("expected decrease action, got %q", next.LastAction)
-	}
-}
-
-func TestNextAutotuneLimitIncreasesBatchSizeWhenQueueSaturated(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            4,
-		PreviousNodesSec: 100,
-		FullQueueSamples: 2,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{
-		QueueOccupancy:    0.95,
-		EnqueuedPerSec:    150,
-		WriteBatchSize:    2048,
-		LastFlushDuration: 20 * time.Millisecond,
-		HadFlush:          true,
-	}, 100, 1, 32, 512, 8192)
-
-	if next.WriteBatchSize != 4096 {
-		t.Fatalf("expected batch size increase to 4096, got %d", next.WriteBatchSize)
-	}
-	if next.LastBatchAction != "increase" {
-		t.Fatalf("expected batch increase action, got %q", next.LastBatchAction)
-	}
-}
-
-func TestNextAutotuneLimitDoesNotIncreaseBatchSizeWhileQueueDrains(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            4,
-		PreviousNodesSec: 100,
-		FullQueueSamples: 3,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{
-		QueueOccupancy:    0.95,
-		QueueDelta:        -0.04,
-		EnqueuedPerSec:    50,
-		WriteBatchSize:    2048,
-		LastFlushDuration: 20 * time.Millisecond,
-		HadFlush:          true,
-	}, 100, 1, 32, 512, 8192)
-
-	if next.WriteBatchSize != 2048 {
-		t.Fatalf("expected batch size to hold while backlog drains, got %d", next.WriteBatchSize)
-	}
-	if next.LastBatchAction != "hold" {
-		t.Fatalf("expected batch hold action, got %q", next.LastBatchAction)
-	}
-}
-
-func TestNextAutotuneLimitDecreasesBatchSizeWhenFlushSlowAndQueueEases(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            4,
-		PreviousNodesSec: 100,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{
-		QueueOccupancy:    0.40,
-		WriteBatchSize:    4096,
-		LastFlushDuration: 3 * time.Second,
-		HadFlush:          true,
-	}, 100, 1, 32, 512, 8192)
-
-	if next.WriteBatchSize != 2048 {
-		t.Fatalf("expected batch size decrease to 2048, got %d", next.WriteBatchSize)
-	}
-	if next.LastBatchAction != "decrease" {
-		t.Fatalf("expected batch decrease action, got %q", next.LastBatchAction)
-	}
-}
-
-func TestNextAutotuneLimitDecreasesBatchSizeAggressivelyWhenFlushVerySlow(t *testing.T) {
-	state := scanAutotuneState{
-		Limit:            4,
-		PreviousNodesSec: 100,
-	}
-
-	next := nextAutotuneLimit(state, scanAutotuneSample{
-		QueueOccupancy:    1.00,
-		WriteBatchSize:    8192,
-		LastFlushDuration: 30 * time.Second,
-		HadFlush:          true,
-	}, 4096, 1, 32, 512, 8192)
-
-	if next.WriteBatchSize != 2048 {
-		t.Fatalf("expected severe slow flush to quarter batch size to 2048, got %d", next.WriteBatchSize)
-	}
-	if next.LastBatchAction != "decrease" {
-		t.Fatalf("expected batch decrease action, got %q", next.LastBatchAction)
-	}
-}
-
-func TestAutotuneChangeSummaryOmitsNoOpChanges(t *testing.T) {
-	got := autotuneChangeSummary(1, 1, 1024, 2048)
-	if got != "batch_size 1024 -> 2048" {
-		t.Fatalf("unexpected batch-only summary: %q", got)
-	}
-
-	got = autotuneChangeSummary(4, 2, 1024, 1024)
-	if got != "concurrency 4 -> 2" {
-		t.Fatalf("unexpected concurrency-only summary: %q", got)
-	}
-}
-
 func testConfig(root, dataDir string) config.Config {
 	return config.Config{
 		AnalyzeRoot:          root,
 		DataDir:              dataDir,
-		ScanAutotune:         false,
-		ScanMinConcurrency:   1,
-		ScanMaxConcurrency:   2,
-		ScanWriteBatchSize:   8,
-		ScanMinWriteBatch:    1,
-		ScanMaxWriteBatch:    64,
+		ScanProfile:          scancontrol.ProfileFixed,
 		ScanProgressInterval: 25 * time.Millisecond,
 		MaxChildrenPerQuery:  100,
 	}

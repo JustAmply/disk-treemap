@@ -6,34 +6,34 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"time"
+
+	"github.com/justamply/disk-treemap/internal/scancontrol"
 )
 
 const (
 	defaultListenAddr          = ":8080"
 	defaultDataDir             = "/data"
-	defaultScanAutotune        = true
-	defaultScanMinConcurrency  = 1
-	defaultScanWriteBatchSize  = 2048
-	defaultScanMinWriteBatch   = 1
-	defaultScanMaxWriteBatch   = 8192
 	defaultScanProgressMS      = 200
 	minScanProgressMS          = 10
 	defaultMaxChildrenPerQuery = 500
 )
 
+var removedTuningEnv = []string{
+	"SCAN_AUTOTUNE",
+	"SCAN_MIN_CONCURRENCY",
+	"SCAN_MAX_CONCURRENCY",
+	"SCAN_WRITE_BATCH_SIZE",
+	"SCAN_MIN_WRITE_BATCH_SIZE",
+	"SCAN_MAX_WRITE_BATCH_SIZE",
+}
+
 type Config struct {
 	AnalyzeRoot          string
 	ListenAddr           string
 	DataDir              string
-	ScanAutotune         bool
-	ScanMinConcurrency   int
-	ScanMaxConcurrency   int
-	ScanWriteBatchSize   int
-	ScanMinWriteBatch    int
-	ScanMaxWriteBatch    int
+	ScanProfile          scancontrol.Profile
 	ScanProgressInterval time.Duration
 	ScanTimeout          time.Duration
 	MaxChildrenPerQuery  int
@@ -44,12 +44,6 @@ func LoadFromEnv() (Config, error) {
 		AnalyzeRoot:          os.Getenv("ANALYZE_ROOT"),
 		ListenAddr:           getenvDefault("LISTEN_ADDR", defaultListenAddr),
 		DataDir:              getenvDefault("DATA_DIR", defaultDataDir),
-		ScanAutotune:         defaultScanAutotune,
-		ScanMinConcurrency:   defaultScanMinConcurrency,
-		ScanMaxConcurrency:   defaultScanMaxConcurrency(),
-		ScanWriteBatchSize:   defaultScanWriteBatchSize,
-		ScanMinWriteBatch:    defaultScanMinWriteBatch,
-		ScanMaxWriteBatch:    defaultScanMaxWriteBatch,
 		ScanProgressInterval: time.Duration(defaultScanProgressMS) * time.Millisecond,
 		MaxChildrenPerQuery:  defaultMaxChildrenPerQuery,
 	}
@@ -61,57 +55,17 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("ANALYZE_ROOT must be absolute: %q", cfg.AnalyzeRoot)
 	}
 
-	var err error
-	cfg.ScanAutotune, err = parseBoolEnv("SCAN_AUTOTUNE", defaultScanAutotune)
-	if err != nil {
-		return Config{}, err
+	for _, name := range removedTuningEnv {
+		if _, exists := os.LookupEnv(name); exists {
+			return Config{}, fmt.Errorf("%s is no longer supported; set SCAN_PROFILE to balanced, throughput, low-impact, or fixed", name)
+		}
 	}
 
-	cfg.ScanMinConcurrency, err = parseIntEnv("SCAN_MIN_CONCURRENCY", defaultScanMinConcurrency)
+	profile, err := scancontrol.ParseProfile(getenvDefault("SCAN_PROFILE", string(scancontrol.ProfileBalanced)))
 	if err != nil {
 		return Config{}, err
 	}
-	if cfg.ScanMinConcurrency < 1 {
-		cfg.ScanMinConcurrency = 1
-	}
-
-	cfg.ScanMaxConcurrency, err = parseIntEnv("SCAN_MAX_CONCURRENCY", defaultScanMaxConcurrency())
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.ScanMaxConcurrency < cfg.ScanMinConcurrency {
-		cfg.ScanMaxConcurrency = cfg.ScanMinConcurrency
-	}
-
-	cfg.ScanWriteBatchSize, err = parseIntEnv("SCAN_WRITE_BATCH_SIZE", defaultScanWriteBatchSize)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.ScanWriteBatchSize < 1 {
-		cfg.ScanWriteBatchSize = 1
-	}
-
-	cfg.ScanMinWriteBatch, err = parseIntEnv("SCAN_MIN_WRITE_BATCH_SIZE", defaultScanMinWriteBatch)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.ScanMinWriteBatch < 1 {
-		cfg.ScanMinWriteBatch = 1
-	}
-
-	cfg.ScanMaxWriteBatch, err = parseIntEnv("SCAN_MAX_WRITE_BATCH_SIZE", defaultScanMaxWriteBatch)
-	if err != nil {
-		return Config{}, err
-	}
-	if cfg.ScanMaxWriteBatch < cfg.ScanMinWriteBatch {
-		cfg.ScanMaxWriteBatch = cfg.ScanMinWriteBatch
-	}
-	if cfg.ScanWriteBatchSize < cfg.ScanMinWriteBatch {
-		cfg.ScanWriteBatchSize = cfg.ScanMinWriteBatch
-	}
-	if cfg.ScanWriteBatchSize > cfg.ScanMaxWriteBatch {
-		cfg.ScanWriteBatchSize = cfg.ScanMaxWriteBatch
-	}
+	cfg.ScanProfile = profile
 
 	progressMS, err := parseIntEnv("SCAN_PROGRESS_INTERVAL_MS", defaultScanProgressMS)
 	if err != nil {
@@ -146,17 +100,6 @@ func LoadFromEnv() (Config, error) {
 	return cfg, nil
 }
 
-func defaultScanMaxConcurrency() int {
-	n := runtime.NumCPU() * 4
-	if n < 4 {
-		n = 4
-	}
-	if n > 64 {
-		n = 64
-	}
-	return n
-}
-
 func (c Config) DatabasePath() string {
 	return filepath.Join(c.DataDir, "scan.db")
 }
@@ -171,18 +114,6 @@ func parseIntEnv(name string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
 	}
 	return n, nil
-}
-
-func parseBoolEnv(name string, defaultValue bool) (bool, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return defaultValue, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	return b, nil
 }
 
 func getenvDefault(name, defaultValue string) string {
