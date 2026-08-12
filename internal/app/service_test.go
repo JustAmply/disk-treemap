@@ -573,15 +573,15 @@ func createCompletedScanWithNodesForServiceTest(t *testing.T, st *store.Store, r
 		t.Fatalf("mark running: %v", err)
 	}
 
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
+	if err := writer.Write(context.Background(), nodes); err != nil {
+		_ = writer.Discard()
 		t.Fatalf("insert nodes: %v", err)
 	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit writer: %v", err)
 	}
 	if err := st.CompleteScan(context.Background(), scanID, "completed", time.Now().UTC(), 0, int64(len(nodes)), 0, ""); err != nil {

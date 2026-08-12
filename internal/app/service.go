@@ -88,11 +88,6 @@ func (b *batchSizeController) Set(size int) int {
 	return size
 }
 
-type scannedNodeWrite struct {
-	Stored   store.StoredNode
-	Progress store.Node
-}
-
 type Service struct {
 	cfg           config.Config
 	store         *store.Store
@@ -237,7 +232,7 @@ func (s *Service) runScan(scanID int64) {
 	}
 	defer cancel()
 
-	writer, err := s.store.BeginNodeWriter(scanCtx, scanID)
+	writer, err := s.store.BeginSnapshot(scanCtx, scanID)
 	if err != nil {
 		s.finishFailure(scanID, fmt.Errorf("open node writer: %w", err), 0, 0, 0)
 		return
@@ -253,7 +248,7 @@ func (s *Service) runScan(scanID int64) {
 		queueSize = 8
 	}
 
-	nodeCh := make(chan scannedNodeWrite, queueSize)
+	nodeCh := make(chan store.Node, queueSize)
 	writerErrCh := make(chan error, 1)
 
 	s.recordWriteBatchSize(scanID, batchController.Get())
@@ -272,41 +267,8 @@ func (s *Service) runScan(scanID int64) {
 			log.Printf("scan #%d fixed control: concurrency=%d batch_size=%d", scanID, applied, batchController.Get())
 		}
 	}
-	var fallbackMu sync.Mutex
-	var fallbackNextID int64
-	fallbackPathIDs := map[string]int64{}
-	fallbackIDForPath := func(path string) int64 {
-		if id, ok := fallbackPathIDs[path]; ok {
-			return id
-		}
-		fallbackNextID++
-		id := fallbackNextID
-		fallbackPathIDs[path] = id
-		return id
-	}
-	toStoredNode := func(node scan.NodeRecord) store.StoredNode {
-		nodeID := node.NodeID
-		parentID := node.ParentID
-		if nodeID == 0 {
-			fallbackMu.Lock()
-			nodeID = fallbackIDForPath(node.Path)
-			if parentID == nil && node.ParentPath != "" {
-				parent := fallbackIDForPath(node.ParentPath)
-				parentID = &parent
-			}
-			fallbackMu.Unlock()
-		}
-		return store.StoredNode{
-			NodeID:    nodeID,
-			ParentID:  parentID,
-			Name:      node.Name,
-			Kind:      node.Kind,
-			SizeBytes: node.SizeBytes,
-			MtimeUnix: node.MtimeUnix,
-		}
-	}
 	result, scanErr := scanner.Scan(scanCtx, func(node scan.NodeRecord) error {
-		progressNode := store.Node{
+		storedNode := store.Node{
 			Path:       node.Path,
 			ParentPath: node.ParentPath,
 			Name:       node.Name,
@@ -318,7 +280,7 @@ func (s *Service) runScan(scanID int64) {
 		select {
 		case <-scanCtx.Done():
 			return scanCtx.Err()
-		case nodeCh <- scannedNodeWrite{Stored: toStoredNode(node), Progress: progressNode}:
+		case nodeCh <- storedNode:
 			s.recordNodeEnqueued(scanID, len(nodeCh), cap(nodeCh))
 			return nil
 		}
@@ -333,20 +295,20 @@ func (s *Service) runScan(scanID int64) {
 	}
 
 	if scanErr != nil {
-		_ = writer.Rollback()
+		_ = writer.Discard()
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, scanErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
 		s.finishFailure(scanID, scanErr, 0, 0, result.WarningCount)
 		return
 	}
 	if writerErr != nil {
-		_ = writer.Rollback()
+		_ = writer.Discard()
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, writerErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
 		s.finishFailure(scanID, fmt.Errorf("write nodes: %w", writerErr), 0, 0, result.WarningCount)
 		return
 	}
 
 	commitStarted := time.Now()
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		s.finishFailure(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
@@ -370,8 +332,8 @@ func (s *Service) runScan(scanID int64) {
 func (s *Service) runNodeWriter(
 	ctx context.Context,
 	scanID int64,
-	writer *store.NodeWriter,
-	nodeCh <-chan scannedNodeWrite,
+	writer *store.SnapshotWriter,
+	nodeCh <-chan store.Node,
 	writerErrCh chan<- error,
 	batchController *batchSizeController,
 	progressInterval time.Duration,
@@ -379,17 +341,13 @@ func (s *Service) runNodeWriter(
 	ticker := time.NewTicker(progressInterval)
 	defer ticker.Stop()
 
-	batch := make([]scannedNodeWrite, 0, batchController.Get())
+	batch := make([]store.Node, 0, batchController.Get())
 	flush := func(now time.Time) error {
 		if len(batch) == 0 {
 			return nil
 		}
-		storedBatch := make([]store.StoredNode, 0, len(batch))
-		for _, node := range batch {
-			storedBatch = append(storedBatch, node.Stored)
-		}
 		started := time.Now()
-		if err := writer.InsertStoredNodesBatch(ctx, scanID, storedBatch); err != nil {
+		if err := writer.Write(ctx, batch); err != nil {
 			return err
 		}
 		s.recordWriterFlush(scanID, time.Since(started))
@@ -427,14 +385,14 @@ func (s *Service) runNodeWriter(
 	}
 }
 
-func (s *Service) recordProgressBatch(scanID int64, batch []scannedNodeWrite, updatedAt time.Time) {
+func (s *Service) recordProgressBatch(scanID int64, batch []store.Node, updatedAt time.Time) {
 	var nodes int64
 	var files int64
 	var dirs int64
 	var bytes int64
 
 	for _, item := range batch {
-		node := item.Progress
+		node := item
 		nodes++
 		switch node.Kind {
 		case "file":
@@ -451,7 +409,7 @@ func (s *Service) recordProgressBatch(scanID int64, batch []scannedNodeWrite, up
 		return
 	}
 
-	s.progress.CurrentPath = batch[len(batch)-1].Progress.Path
+	s.progress.CurrentPath = batch[len(batch)-1].Path
 	s.progress.ScannedNodes += nodes
 	s.progress.ScannedFiles += files
 	s.progress.ScannedDirs += dirs

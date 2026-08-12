@@ -23,8 +23,7 @@ const (
 )
 
 type Store struct {
-	db        *sql.DB
-	hasLegacy bool
+	db *sql.DB
 }
 
 type ScanRun struct {
@@ -58,15 +57,6 @@ type Node struct {
 	MtimeUnix  int64  `json:"mtime_unix"`
 }
 
-type StoredNode struct {
-	NodeID    int64
-	ParentID  *int64
-	Name      string
-	Kind      string
-	SizeBytes int64
-	MtimeUnix int64
-}
-
 type NodeQueryOptions struct {
 	Limit   int
 	Query   string
@@ -80,11 +70,13 @@ type ChildAggregate struct {
 	TotalBytes int64
 }
 
-type NodeWriter struct {
-	tx         *sql.Tx
-	insertInto string
-	nextNodeID int64
-	pathIDs    map[string]int64
+type SnapshotWriter struct {
+	tx              *sql.Tx
+	scanID          int64
+	nextNodeID      int64
+	pathIDs         map[string]int64
+	writtenPaths    map[string]struct{}
+	referencedPaths map[string]struct{}
 }
 
 type compactNodeRow struct {
@@ -147,7 +139,7 @@ func (s *Store) Init(ctx context.Context) error {
 		}
 	}
 
-	if err := s.migrateLegacyNodes(ctx); err != nil {
+	if err := s.prepareCompactNodeSchema(ctx); err != nil {
 		return err
 	}
 
@@ -174,10 +166,13 @@ func (s *Store) Init(ctx context.Context) error {
 			return fmt.Errorf("init compact node schema: %w", err)
 		}
 	}
+	if err := s.discardLegacyRuns(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
-func (s *Store) migrateLegacyNodes(ctx context.Context) error {
+func (s *Store) prepareCompactNodeSchema(ctx context.Context) error {
 	nodesExists, err := s.tableExists(ctx, "nodes")
 	if err != nil {
 		return err
@@ -186,8 +181,6 @@ func (s *Store) migrateLegacyNodes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	s.hasLegacy = legacyExists
-
 	if !nodesExists {
 		return nil
 	}
@@ -207,7 +200,30 @@ func (s *Store) migrateLegacyNodes(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `ALTER TABLE nodes RENAME TO legacy_nodes`); err != nil {
 		return fmt.Errorf("rename legacy nodes table: %w", err)
 	}
-	s.hasLegacy = true
+	return nil
+}
+
+func (s *Store) discardLegacyRuns(ctx context.Context) error {
+	exists, err := s.tableExists(ctx, "legacy_nodes")
+	if err != nil || !exists {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin legacy cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_runs WHERE id IN (SELECT DISTINCT scan_id FROM legacy_nodes)`); err != nil {
+		return fmt.Errorf("delete legacy scan runs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE legacy_nodes`); err != nil {
+		return fmt.Errorf("drop legacy nodes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit legacy cleanup: %w", err)
+	}
 	return nil
 }
 
@@ -289,8 +305,7 @@ func (s *Store) FailInterruptedScans(ctx context.Context, finishedAt time.Time) 
 	return ids, nil
 }
 
-func (s *Store) BeginNodeWriter(ctx context.Context, scanID int64) (*NodeWriter, error) {
-	_ = scanID
+func (s *Store) BeginSnapshot(ctx context.Context, scanID int64) (*SnapshotWriter, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -313,54 +328,56 @@ func (s *Store) BeginNodeWriter(ctx context.Context, scanID int64) (*NodeWriter,
 		_ = tx.Rollback()
 		return nil, fmt.Errorf("create node writer stage: %w", err)
 	}
-	return &NodeWriter{
-		tx:         tx,
-		insertInto: nodeWriterStageTable,
-		nextNodeID: 1,
-		pathIDs:    map[string]int64{},
+	return &SnapshotWriter{
+		tx:              tx,
+		scanID:          scanID,
+		nextNodeID:      1,
+		pathIDs:         map[string]int64{},
+		writtenPaths:    map[string]struct{}{},
+		referencedPaths: map[string]struct{}{},
 	}, nil
 }
 
-func (w *NodeWriter) InsertNode(ctx context.Context, scanID int64, node Node) error {
-	return w.InsertNodesBatch(ctx, scanID, []Node{node})
-}
-
-func (w *NodeWriter) InsertNodesBatch(ctx context.Context, scanID int64, nodes []Node) error {
+func (w *SnapshotWriter) Write(ctx context.Context, nodes []Node) error {
 	if len(nodes) == 0 {
 		return nil
 	}
 
 	for _, node := range nodes {
 		w.idForPath(node.Path)
+		w.writtenPaths[node.Path] = struct{}{}
+		if node.ParentPath != "" {
+			w.idForPath(node.ParentPath)
+			w.referencedPaths[node.ParentPath] = struct{}{}
+		}
 	}
 
-	stored := make([]StoredNode, 0, len(nodes))
+	stored := make([]compactNodeRow, 0, len(nodes))
 	for _, node := range nodes {
 		nodeID := w.idForPath(node.Path)
 
-		var parentID *int64
+		var parentID sql.NullInt64
 		if node.ParentPath != "" {
-			parent, ok := w.pathIDs[node.ParentPath]
-			if !ok {
-				return fmt.Errorf("parent path %q is not available for node %q", node.ParentPath, node.Path)
-			}
-			parentID = &parent
+			parentID = sql.NullInt64{Int64: w.idForPath(node.ParentPath), Valid: true}
 		}
-
-		stored = append(stored, StoredNode{
+		kindCode, err := compactKindCode(node.Kind)
+		if err != nil {
+			return err
+		}
+		stored = append(stored, compactNodeRow{
 			NodeID:    nodeID,
 			ParentID:  parentID,
 			Name:      node.Name,
-			Kind:      node.Kind,
+			KindCode:  kindCode,
 			SizeBytes: node.SizeBytes,
 			MtimeUnix: node.MtimeUnix,
 		})
 	}
 
-	return w.InsertStoredNodesBatch(ctx, scanID, stored)
+	return w.writeCompactRows(ctx, stored)
 }
 
-func (w *NodeWriter) idForPath(path string) int64 {
+func (w *SnapshotWriter) idForPath(path string) int64 {
 	if id, ok := w.pathIDs[path]; ok {
 		return id
 	}
@@ -370,7 +387,7 @@ func (w *NodeWriter) idForPath(path string) int64 {
 	return id
 }
 
-func (w *NodeWriter) InsertStoredNodesBatch(ctx context.Context, scanID int64, nodes []StoredNode) error {
+func (w *SnapshotWriter) writeCompactRows(ctx context.Context, nodes []compactNodeRow) error {
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -380,7 +397,7 @@ func (w *NodeWriter) InsertStoredNodesBatch(ctx context.Context, scanID int64, n
 		if end > len(nodes) {
 			end = len(nodes)
 		}
-		if err := w.insertStoredNodeChunk(ctx, scanID, nodes[start:end]); err != nil {
+		if err := w.writeCompactChunk(ctx, nodes[start:end]); err != nil {
 			return err
 		}
 	}
@@ -388,10 +405,10 @@ func (w *NodeWriter) InsertStoredNodesBatch(ctx context.Context, scanID int64, n
 	return nil
 }
 
-func (w *NodeWriter) insertStoredNodeChunk(ctx context.Context, scanID int64, nodes []StoredNode) error {
+func (w *SnapshotWriter) writeCompactChunk(ctx context.Context, nodes []compactNodeRow) error {
 	var query strings.Builder
 	query.WriteString(`INSERT INTO `)
-	query.WriteString(w.insertInto)
+	query.WriteString(nodeWriterStageTable)
 	query.WriteString(`(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix) VALUES `)
 
 	args := make([]any, 0, len(nodes)*nodeInsertColumnCount)
@@ -399,12 +416,8 @@ func (w *NodeWriter) insertStoredNodeChunk(ctx context.Context, scanID int64, no
 		if i > 0 {
 			query.WriteString(",")
 		}
-		kindCode, err := compactKindCode(node.Kind)
-		if err != nil {
-			return err
-		}
 		query.WriteString("(?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, scanID, node.NodeID, nullableInt64(node.ParentID), node.Name, kindCode, node.SizeBytes, node.MtimeUnix)
+		args = append(args, w.scanID, node.NodeID, nullableNullInt64(node.ParentID), node.Name, node.KindCode, node.SizeBytes, node.MtimeUnix)
 	}
 
 	if _, err := w.tx.ExecContext(ctx, query.String(), args...); err != nil {
@@ -414,9 +427,15 @@ func (w *NodeWriter) insertStoredNodeChunk(ctx context.Context, scanID int64, no
 	return nil
 }
 
-func (w *NodeWriter) Commit() error {
+func (w *SnapshotWriter) Publish() error {
 	if w == nil {
 		return nil
+	}
+	for path := range w.referencedPaths {
+		if _, exists := w.writtenPaths[path]; !exists {
+			_ = w.tx.Rollback()
+			return fmt.Errorf("parent path %q was not written", path)
+		}
 	}
 	if _, err := w.tx.Exec(`
 		INSERT INTO nodes(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix)
@@ -434,7 +453,7 @@ func (w *NodeWriter) Commit() error {
 	return w.tx.Commit()
 }
 
-func (w *NodeWriter) Rollback() error {
+func (w *SnapshotWriter) Discard() error {
 	if w == nil {
 		return nil
 	}
@@ -601,9 +620,6 @@ func (s *Store) OptimizeStorage(ctx context.Context, forceVacuum bool) error {
 func (s *Store) GetNode(ctx context.Context, scanID int64, path string) (Node, error) {
 	rootPath, nodeID, err := s.resolveNodeID(ctx, scanID, path)
 	if err != nil {
-		if s.hasLegacy && errors.Is(err, ErrNotFound) {
-			return s.getLegacyNode(ctx, scanID, path)
-		}
 		return Node{}, err
 	}
 
@@ -623,9 +639,6 @@ func (s *Store) ListChildren(ctx context.Context, scanID int64, parentPath strin
 func (s *Store) AggregateChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) (ChildAggregate, error) {
 	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
-		if s.hasLegacy && errors.Is(err, ErrNotFound) {
-			return s.aggregateLegacyChildrenWithOptions(ctx, scanID, parentPath, opts)
-		}
 		return ChildAggregate{}, err
 	}
 
@@ -654,9 +667,6 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 
 	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
-		if s.hasLegacy && errors.Is(err, ErrNotFound) {
-			return s.listLegacyChildrenWithOptions(ctx, scanID, parentPath, opts)
-		}
 		return nil, err
 	}
 
@@ -709,9 +719,6 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 
 	rootPath, baseID, err := s.resolveNodeID(ctx, scanID, basePath)
 	if err != nil {
-		if s.hasLegacy && errors.Is(err, ErrNotFound) {
-			return s.listLegacyLargestInPathWithOptions(ctx, scanID, basePath, opts)
-		}
 		if errors.Is(err, ErrNotFound) {
 			return []Node{}, nil
 		}
@@ -902,11 +909,11 @@ func descendantRelPrefix(rootPath, basePath string) (string, error) {
 	return rel + string(filepath.Separator), nil
 }
 
-func nullableInt64(v *int64) any {
-	if v == nil {
+func nullableNullInt64(v sql.NullInt64) any {
+	if !v.Valid {
 		return nil
 	}
-	return *v
+	return v.Int64
 }
 
 func compactKindCode(kind string) (int, error) {
@@ -947,21 +954,6 @@ func appendCompactNodeFilters(query *strings.Builder, args *[]any, opts NodeQuer
 	}
 }
 
-func appendLegacyNodeFilters(query *strings.Builder, args *[]any, opts NodeQueryOptions) {
-	if opts.Kind == "file" || opts.Kind == "dir" {
-		query.WriteString(" AND kind=?")
-		*args = append(*args, opts.Kind)
-	}
-	if opts.Query != "" {
-		query.WriteString(" AND lower(name) LIKE ?")
-		*args = append(*args, "%"+strings.ToLower(opts.Query)+"%")
-	}
-	if opts.MinSize > 0 {
-		query.WriteString(" AND size_bytes>=?")
-		*args = append(*args, opts.MinSize)
-	}
-}
-
 func normalizeSort(sort string) string {
 	switch sort {
 	case "size_asc":
@@ -975,154 +967,6 @@ func normalizeSort(sort string) string {
 	default:
 		return "size_bytes DESC, name ASC"
 	}
-}
-
-func (s *Store) getLegacyNode(ctx context.Context, scanID int64, path string) (Node, error) {
-	var n Node
-	err := s.db.QueryRowContext(ctx, `
-		SELECT path, parent_path, name, kind, size_bytes, mtime_unix
-		FROM legacy_nodes WHERE scan_id=? AND path=?
-	`, scanID, path).Scan(&n.Path, &n.ParentPath, &n.Name, &n.Kind, &n.SizeBytes, &n.MtimeUnix)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Node{}, ErrNotFound
-		}
-		return Node{}, fmt.Errorf("get legacy node: %w", err)
-	}
-	return n, nil
-}
-
-func (s *Store) aggregateLegacyChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) (ChildAggregate, error) {
-	query := strings.Builder{}
-	query.WriteString(`
-		SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
-		FROM legacy_nodes
-		WHERE scan_id=? AND parent_path=?
-	`)
-
-	args := []any{scanID, parentPath}
-	appendLegacyNodeFilters(&query, &args, opts)
-
-	var agg ChildAggregate
-	if err := s.db.QueryRowContext(ctx, query.String(), args...).Scan(&agg.Count, &agg.TotalBytes); err != nil {
-		return ChildAggregate{}, fmt.Errorf("aggregate legacy children: %w", err)
-	}
-	return agg, nil
-}
-
-func (s *Store) listLegacyChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) ([]Node, error) {
-	sortClause := normalizeSort(opts.Sort)
-	query := strings.Builder{}
-	query.WriteString(`
-		SELECT path, parent_path, name, kind, size_bytes, mtime_unix
-		FROM legacy_nodes
-		WHERE scan_id=? AND parent_path=?
-	`)
-
-	args := []any{scanID, parentPath}
-	appendLegacyNodeFilters(&query, &args, opts)
-
-	query.WriteString(" ORDER BY ")
-	query.WriteString(sortClause)
-	query.WriteString(" LIMIT ?")
-	args = append(args, opts.Limit)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, fmt.Errorf("list legacy children: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]Node, 0)
-	for rows.Next() {
-		var n Node
-		if err := rows.Scan(&n.Path, &n.ParentPath, &n.Name, &n.Kind, &n.SizeBytes, &n.MtimeUnix); err != nil {
-			return nil, fmt.Errorf("scan legacy child row: %w", err)
-		}
-		items = append(items, n)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate legacy children: %w", err)
-	}
-	return items, nil
-}
-
-func (s *Store) listLegacyLargestInPathWithOptions(ctx context.Context, scanID int64, basePath string, opts NodeQueryOptions) ([]Node, error) {
-	prefixes := descendantPrefixes(basePath)
-
-	sortClause := normalizeSort(opts.Sort)
-	query := strings.Builder{}
-	query.WriteString(`
-		SELECT path, parent_path, name, kind, size_bytes, mtime_unix
-		FROM legacy_nodes
-		WHERE scan_id=?
-		  AND path<>?
-		  AND (`)
-	for i := range prefixes {
-		if i > 0 {
-			query.WriteString(" OR ")
-		}
-		query.WriteString("instr(path, ?) = 1")
-	}
-	query.WriteString(")")
-
-	args := make([]any, 0, 2+len(prefixes)+4)
-	args = append(args, scanID, basePath)
-	for _, prefix := range prefixes {
-		args = append(args, prefix)
-	}
-	appendLegacyNodeFilters(&query, &args, opts)
-
-	query.WriteString(" ORDER BY ")
-	query.WriteString(sortClause)
-	query.WriteString(" LIMIT ?")
-	args = append(args, opts.Limit)
-
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, fmt.Errorf("list legacy largest: %w", err)
-	}
-	defer rows.Close()
-
-	items := make([]Node, 0)
-	for rows.Next() {
-		var n Node
-		if err := rows.Scan(&n.Path, &n.ParentPath, &n.Name, &n.Kind, &n.SizeBytes, &n.MtimeUnix); err != nil {
-			return nil, fmt.Errorf("scan legacy largest row: %w", err)
-		}
-		items = append(items, n)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate legacy largest rows: %w", err)
-	}
-	return items, nil
-}
-
-func descendantPrefixes(basePath string) []string {
-	prefixes := make([]string, 0, 2)
-	seen := map[string]struct{}{}
-
-	add := func(prefix string) {
-		if prefix == "" {
-			return
-		}
-		if _, ok := seen[prefix]; ok {
-			return
-		}
-		seen[prefix] = struct{}{}
-		prefixes = append(prefixes, prefix)
-	}
-
-	if basePath == "/" || basePath == `\` {
-		add(basePath)
-		return prefixes
-	}
-
-	cleanForward := strings.TrimRight(basePath, "/") + "/"
-	cleanBackward := strings.TrimRight(basePath, `\`) + `\`
-	add(cleanForward)
-	add(cleanBackward)
-	return prefixes
 }
 
 func (s *Store) tableExists(ctx context.Context, name string) (bool, error) {

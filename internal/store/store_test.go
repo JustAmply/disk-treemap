@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -163,7 +164,7 @@ func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
 	}
 }
 
-func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
+func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
 	st := newTestStore(t)
 
 	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
@@ -171,7 +172,7 @@ func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 		t.Fatalf("create scan: %v", err)
 	}
 
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
@@ -182,11 +183,11 @@ func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 		{Path: "/scanroot/b.bin", ParentPath: "/scanroot", Name: "b.bin", Kind: "file", SizeBytes: 20},
 	}
 
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
+	if err := writer.Write(context.Background(), nodes); err != nil {
+		_ = writer.Discard()
 		t.Fatalf("insert nodes batch: %v", err)
 	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -199,7 +200,7 @@ func TestInsertNodesBatchInsertsMultipleRows(t *testing.T) {
 	}
 }
 
-func TestInsertNodesBatchSupportsChildBeforeParent(t *testing.T) {
+func TestSnapshotWriterSupportsParentInLaterBatch(t *testing.T) {
 	st := newTestStore(t)
 
 	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
@@ -207,24 +208,24 @@ func TestInsertNodesBatchSupportsChildBeforeParent(t *testing.T) {
 		t.Fatalf("create scan: %v", err)
 	}
 
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
 
 	filePath := filepath.Join("/scanroot", "dir", "file.bin")
 	dirPath := filepath.Join("/scanroot", "dir")
-	nodes := []Node{
-		{Path: filePath, ParentPath: dirPath, Name: "file.bin", Kind: "file", SizeBytes: 10},
-		{Path: dirPath, ParentPath: "/scanroot", Name: "dir", Kind: "dir", SizeBytes: 10},
-		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10},
+	for _, batch := range [][]Node{
+		{{Path: filePath, ParentPath: dirPath, Name: "file.bin", Kind: "file", SizeBytes: 10}},
+		{{Path: dirPath, ParentPath: "/scanroot", Name: "dir", Kind: "dir", SizeBytes: 10}},
+		{{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 10}},
+	} {
+		if err := writer.Write(context.Background(), batch); err != nil {
+			_ = writer.Discard()
+			t.Fatalf("write out-of-order batch: %v", err)
+		}
 	}
-
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
-		t.Fatalf("insert out-of-order nodes: %v", err)
-	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -237,7 +238,7 @@ func TestInsertNodesBatchSupportsChildBeforeParent(t *testing.T) {
 	}
 }
 
-func TestInsertNodesBatchRejectsMissingParent(t *testing.T) {
+func TestSnapshotWriterRejectsMissingParentOnPublish(t *testing.T) {
 	st := newTestStore(t)
 
 	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
@@ -245,21 +246,25 @@ func TestInsertNodesBatchRejectsMissingParent(t *testing.T) {
 		t.Fatalf("create scan: %v", err)
 	}
 
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
-	defer writer.Rollback()
+	defer writer.Discard()
 
-	err = writer.InsertNodesBatch(context.Background(), scanID, []Node{
+	err = writer.Write(context.Background(), []Node{
 		{Path: filepath.Join("/scanroot", "orphan.bin"), ParentPath: "/scanroot", Name: "orphan.bin", Kind: "file", SizeBytes: 10},
 	})
+	if err != nil {
+		t.Fatalf("write orphan node: %v", err)
+	}
+	err = writer.Publish()
 	if err == nil || !strings.Contains(err.Error(), "parent path") {
 		t.Fatalf("expected missing parent error, got %v", err)
 	}
 }
 
-func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
+func TestSnapshotWriterChunksBeyondSQLiteParameterLimit(t *testing.T) {
 	st := newTestStore(t)
 
 	scanID, err := st.CreateScanRun(context.Background(), "/scanroot")
@@ -267,7 +272,7 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 		t.Fatalf("create scan: %v", err)
 	}
 
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
@@ -285,11 +290,11 @@ func TestInsertNodesBatchChunksWhenExceedingSQLiteParameterLimit(t *testing.T) {
 		})
 	}
 
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
+	if err := writer.Write(context.Background(), nodes); err != nil {
+		_ = writer.Discard()
 		t.Fatalf("insert nodes batch: %v", err)
 	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
@@ -332,6 +337,83 @@ func TestCompactSchemaIsSmallerForDeepPaths(t *testing.T) {
 
 	if compactSize >= legacySize*6/10 {
 		t.Fatalf("expected compact DB to be at least 40%% smaller, legacy=%d compact=%d", legacySize, compactSize)
+	}
+}
+
+func TestInitReplacesLegacyDatabaseWithEmptyCompactStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "scanroot")
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	insertLegacyFixture(t, dbPath, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 10},
+		{Path: filepath.Join(root, "old.bin"), ParentPath: root, Name: "old.bin", Kind: "file", SizeBytes: 10},
+	})
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open legacy store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("replace legacy store: %v", err)
+	}
+
+	current, err := st.GetLatestScanRun(context.Background())
+	if err != nil {
+		t.Fatalf("get latest scan after replacement: %v", err)
+	}
+	if current != nil {
+		t.Fatalf("expected legacy run to be removed, got %+v", current)
+	}
+	if exists, err := st.tableExists(context.Background(), "legacy_nodes"); err != nil || exists {
+		t.Fatalf("expected legacy table to be removed, exists=%t err=%v", exists, err)
+	}
+}
+
+func TestInitDiscardsOnlyRunsBackedByLegacyNodes(t *testing.T) {
+	st := newTestStore(t)
+	root := filepath.Join(t.TempDir(), "scanroot")
+	compactID := insertCompletedScan(t, st, root, []Node{
+		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 20},
+		{Path: filepath.Join(root, "current.bin"), ParentPath: root, Name: "current.bin", Kind: "file", SizeBytes: 20},
+	})
+
+	legacyID, err := st.CreateScanRun(context.Background(), root)
+	if err != nil {
+		t.Fatalf("create legacy run metadata: %v", err)
+	}
+	if err := st.CompleteScan(context.Background(), legacyID, "completed", time.Now().UTC(), 10, 1, 0, ""); err != nil {
+		t.Fatalf("complete legacy run metadata: %v", err)
+	}
+	if _, err := st.db.ExecContext(context.Background(), `
+		CREATE TABLE legacy_nodes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			scan_id INTEGER NOT NULL,
+			path TEXT NOT NULL,
+			parent_path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			mtime_unix INTEGER NOT NULL,
+			FOREIGN KEY (scan_id) REFERENCES scan_runs(id) ON DELETE CASCADE
+		)
+	`); err != nil {
+		t.Fatalf("create coexisting legacy table: %v", err)
+	}
+	if _, err := st.db.ExecContext(context.Background(), `
+		INSERT INTO legacy_nodes(scan_id, path, parent_path, name, kind, size_bytes, mtime_unix)
+		VALUES(?, ?, '', ?, 'dir', 10, 1)
+	`, legacyID, root, filepath.Base(root)); err != nil {
+		t.Fatalf("insert coexisting legacy node: %v", err)
+	}
+
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("discard coexisting legacy run: %v", err)
+	}
+	if _, err := st.GetScanRun(context.Background(), legacyID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected legacy run %d to be removed, got %v", legacyID, err)
+	}
+	if _, err := st.GetNode(context.Background(), compactID, root); err != nil {
+		t.Fatalf("expected compact snapshot %d to remain readable: %v", compactID, err)
 	}
 }
 
@@ -490,15 +572,15 @@ func insertCompletedScan(t *testing.T, st *Store, root string, nodes []Node) int
 	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		t.Fatalf("begin writer: %v", err)
 	}
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
+	if err := writer.Write(context.Background(), nodes); err != nil {
+		_ = writer.Discard()
 		t.Fatalf("insert nodes: %v", err)
 	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		t.Fatalf("commit nodes: %v", err)
 	}
 	var total int64
@@ -554,15 +636,15 @@ func insertCompletedScanBenchmark(b *testing.B, st *Store, root string, nodes []
 	if err := st.MarkScanRunning(context.Background(), scanID, time.Now().UTC()); err != nil {
 		b.Fatalf("mark running: %v", err)
 	}
-	writer, err := st.BeginNodeWriter(context.Background(), scanID)
+	writer, err := st.BeginSnapshot(context.Background(), scanID)
 	if err != nil {
 		b.Fatalf("begin writer: %v", err)
 	}
-	if err := writer.InsertNodesBatch(context.Background(), scanID, nodes); err != nil {
-		_ = writer.Rollback()
+	if err := writer.Write(context.Background(), nodes); err != nil {
+		_ = writer.Discard()
 		b.Fatalf("insert nodes: %v", err)
 	}
-	if err := writer.Commit(); err != nil {
+	if err := writer.Publish(); err != nil {
 		b.Fatalf("commit nodes: %v", err)
 	}
 

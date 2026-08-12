@@ -109,6 +109,7 @@ Notes:
 
 - Mount the scan root read-only whenever possible
 - Use a persistent volume for `DATA_DIR` so scans survive container restarts
+- On first start with the former path-based node schema, Scan Runs backed by that legacy schema are removed automatically; existing compact Scan Snapshots remain
 - Keep the app behind a reverse proxy or private network if others can reach it
 - The container runs as `root` by default so it can read more files; use that deliberately
 

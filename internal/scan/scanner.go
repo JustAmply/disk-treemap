@@ -9,13 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
 type NodeRecord struct {
-	NodeID     int64
-	ParentID   *int64
 	Path       string
 	ParentPath string
 	Name       string
@@ -178,12 +175,7 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return Result{}, errors.New("node callback is required")
 	}
 
-	var nextNodeID int64
-	allocNodeID := func() int64 {
-		return atomic.AddInt64(&nextNodeID, 1)
-	}
-
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", 0, false, nil, nil, s.dirLimiter, s.fileLimiter, allocNodeID, cb)
+	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", nil, nil, s.dirLimiter, s.fileLimiter, cb)
 	if err != nil {
 		return Result{}, err
 	}
@@ -198,13 +190,10 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 func (s *Scanner) scanNode(
 	ctx context.Context,
 	path, parentPath string,
-	parentID int64,
-	hasParent bool,
 	entry fs.DirEntry,
 	knownInfo fs.FileInfo,
 	dirLimiter *concurrencyLimiter,
 	fileLimiter *concurrencyLimiter,
-	allocNodeID func() int64,
 	emit NodeCallback,
 ) (int64, int64, int64, error) {
 	if err := ctx.Err(); err != nil {
@@ -235,16 +224,7 @@ func (s *Scanner) scanNode(
 		return 0, 0, 0, nil
 	}
 
-	nodeID := allocNodeID()
-	var nodeParentID *int64
-	if hasParent {
-		parent := parentID
-		nodeParentID = &parent
-	}
-
 	node := NodeRecord{
-		NodeID:     nodeID,
-		ParentID:   nodeParentID,
 		Path:       path,
 		ParentPath: parentPath,
 		Name:       filepath.Base(path),
@@ -330,12 +310,12 @@ func (s *Scanner) scanNode(
 				}
 
 				if info.IsDir() {
-					sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirLimiter, fileLimiter, allocNodeID, emit)
+					sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit)
 					apply(sz, n, w, childErr)
 					return
 				}
 
-				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, info, dirLimiter, fileLimiter, allocNodeID, emit)
+				sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
@@ -353,13 +333,13 @@ func (s *Scanner) scanNode(
 			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
 				defer dirLimiter.Release()
-				sz, n, w, childErr := s.scanNode(ctx, p, path, nodeID, true, e, nil, dirLimiter, fileLimiter, allocNodeID, emit)
+				sz, n, w, childErr := s.scanNode(ctx, p, path, e, nil, dirLimiter, fileLimiter, emit)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
 		}
 
-		sz, n, w, childErr := s.scanNode(ctx, childPath, path, nodeID, true, childEntry, nil, dirLimiter, fileLimiter, allocNodeID, emit)
+		sz, n, w, childErr := s.scanNode(ctx, childPath, path, childEntry, nil, dirLimiter, fileLimiter, emit)
 		apply(sz, n, w, childErr)
 	}
 
