@@ -149,6 +149,35 @@ func (f *failingScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.R
 	return scan.Result{}, f.err
 }
 
+type midStreamWriterFailureScanner struct {
+	root       string
+	totalNodes int
+	invalidAt  int
+}
+
+func (m *midStreamWriterFailureScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.Result, error) {
+	for i := 0; i < m.totalNodes; i++ {
+		kind := "file"
+		if i == m.invalidAt {
+			// The snapshot writer rejects unknown kinds, failing the write
+			// while the scanner is still producing nodes.
+			kind = "symlink"
+		}
+		node := scan.NodeRecord{
+			Path:       filepath.Join(m.root, fmt.Sprintf("node-%06d.bin", i)),
+			ParentPath: m.root,
+			Name:       fmt.Sprintf("node-%06d.bin", i),
+			Kind:       kind,
+			SizeBytes:  1,
+			MtimeUnix:  1,
+		}
+		if err := cb(node); err != nil {
+			return scan.Result{}, err
+		}
+	}
+	return scan.Result{TotalNodes: int64(m.totalNodes), TotalBytes: int64(m.totalNodes)}, nil
+}
+
 func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
@@ -330,6 +359,86 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(run.Error, "commit nodes") {
 		t.Fatalf("expected commit node error, got %q", run.Error)
+	}
+}
+
+func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(cfg, st)
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		// totalNodes exceeds the node channel capacity (16384 for the fixed
+		// profile) plus everything the writer consumes before the invalid
+		// node kills it, so the producer provably blocks on a full channel
+		// once the writer goroutine is gone.
+		return &midStreamWriterFailureScanner{root: root, totalNodes: 30000, invalidAt: 3000}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	run := waitForScanStatus(t, st, scanID)
+	if run.Status != "failed" {
+		t.Fatalf("expected failed, got %s", run.Status)
+	}
+	if !strings.Contains(run.Error, "write nodes") {
+		t.Fatalf("expected write nodes error, got %q", run.Error)
+	}
+	if !strings.Contains(run.Error, "symlink") {
+		t.Fatalf("expected unsupported kind in error, got %q", run.Error)
+	}
+}
+
+func TestScanTimeoutFailsRun(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	cfg := testConfig(root, dataDir)
+	cfg.ScanTimeout = 100 * time.Millisecond
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(cfg, st)
+	start := make(chan struct{})
+	release := make(chan struct{})
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &blockingScanner{root: root, start: start, release: release}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+
+	<-start
+
+	run := waitForScanStatus(t, st, scanID)
+	if run.Status != "failed" {
+		t.Fatalf("expected failed, got %s", run.Status)
+	}
+	if !strings.Contains(run.Error, "context deadline exceeded") {
+		t.Fatalf("expected deadline exceeded error, got %q", run.Error)
 	}
 }
 

@@ -148,7 +148,7 @@ func (s *Service) runScan(scanID int64) {
 	writerErrCh := make(chan error, 1)
 
 	s.runs.recordWriteBatchSize(scanID, batchController.Get())
-	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchController, progressInterval)
+	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchController, progressInterval, cancel)
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, limits.Max.Concurrency)
 	autotuneCtx, cancelAutotune := context.WithCancel(scanCtx)
@@ -190,16 +190,18 @@ func (s *Service) runScan(scanID int64) {
 		scanErr = fmt.Errorf("scan found no readable files under %q (warnings: %d); check mount and permissions", s.cfg.AnalyzeRoot, result.WarningCount)
 	}
 
-	if scanErr != nil {
+	if scanErr != nil || writerErr != nil {
 		_ = writer.Discard()
-		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, scanErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
-		s.runs.fail(scanID, scanErr, 0, 0, result.WarningCount)
-		return
-	}
-	if writerErr != nil {
-		_ = writer.Discard()
-		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, writerErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
-		s.runs.fail(scanID, fmt.Errorf("write nodes: %w", writerErr), 0, 0, result.WarningCount)
+		runErr := scanErr
+		if writerErr != nil && !isContextError(writerErr) {
+			// A writer failure cancels the scan context, so the scanner only
+			// reports the resulting cancellation; surface the real cause.
+			runErr = fmt.Errorf("write nodes: %w", writerErr)
+		} else if runErr == nil {
+			runErr = writerErr
+		}
+		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, runErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
+		s.runs.fail(scanID, runErr, 0, 0, result.WarningCount)
 		return
 	}
 
@@ -225,6 +227,7 @@ func (s *Service) runNodeWriter(
 	writerErrCh chan<- error,
 	batchController *batchSizeController,
 	progressInterval time.Duration,
+	cancelScan context.CancelFunc,
 ) {
 	ticker := time.NewTicker(progressInterval)
 	defer ticker.Stop()
@@ -257,12 +260,16 @@ func (s *Service) runNodeWriter(
 			s.runs.recordWriteBatchSize(scanID, currentBatchSize)
 			if len(batch) >= currentBatchSize {
 				if err := flush(time.Now().UTC()); err != nil {
+					// Cancel the scan so the producer cannot block forever on a
+					// full nodeCh once this goroutine has exited.
+					cancelScan()
 					writerErrCh <- err
 					return
 				}
 			}
 		case tickAt := <-ticker.C:
 			if err := flush(tickAt.UTC()); err != nil {
+				cancelScan()
 				writerErrCh <- err
 				return
 			}
@@ -394,6 +401,10 @@ func (s *Service) GetFolderView(ctx context.Context, scanID int64, request Folde
 
 func (s *Service) Config() config.Config {
 	return s.cfg
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func isUnreadableScanResult(result scan.Result) bool {
