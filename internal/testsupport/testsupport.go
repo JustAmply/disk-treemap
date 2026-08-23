@@ -46,7 +46,9 @@ func OpenStore(t *testing.T, dataDir string) *store.Store {
 func RegisterServiceCleanup(t *testing.T, shutdown func(context.Context) error) {
 	t.Helper()
 	t.Cleanup(func() {
-		if err := shutdown(context.Background()); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdown(ctx); err != nil {
 			t.Errorf("shutdown service: %v", err)
 		}
 	})
