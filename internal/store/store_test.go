@@ -23,7 +23,7 @@ func TestListChildrenSortedBySizeThenName(t *testing.T) {
 		{Path: "/scanroot/c", ParentPath: "/scanroot", Name: "c", Kind: "file", SizeBytes: 5},
 	})
 
-	children, err := st.ListChildren(context.Background(), scanID, "/scanroot", 10)
+	children, err := st.ListChildrenWithOptions(context.Background(), scanID, "/scanroot", NodeQueryOptions{Limit: 10, Sort: "size_desc"})
 	if err != nil {
 		t.Fatalf("list children: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
 		{Path: filepath.Join(root, "file.bin"), ParentPath: root, Name: "file.bin", Kind: "file", SizeBytes: 10},
 	})
 
-	items, err := st.ListLargestInPath(context.Background(), scanID, filepath.Join(root, "missing"), 10)
+	items, err := st.ListLargestInPathWithOptions(context.Background(), scanID, filepath.Join(root, "missing"), NodeQueryOptions{Limit: 10, Sort: "size_desc"})
 	if err != nil {
 		t.Fatalf("list largest missing base: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	children, err := st.ListChildren(context.Background(), scanID, "/scanroot", 10)
+	children, err := st.ListChildrenWithOptions(context.Background(), scanID, "/scanroot", NodeQueryOptions{Limit: 10, Sort: "size_desc"})
 	if err != nil {
 		t.Fatalf("list children: %v", err)
 	}
@@ -625,7 +625,7 @@ func BenchmarkListLargestInPath(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := st.ListLargestInPath(context.Background(), scanID, "/scanroot", 200); err != nil {
+		if _, err := st.ListLargestInPathWithOptions(context.Background(), scanID, "/scanroot", NodeQueryOptions{Limit: 200, Sort: "size_desc"}); err != nil {
 			b.Fatalf("list largest: %v", err)
 		}
 	}

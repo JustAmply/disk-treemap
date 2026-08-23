@@ -461,10 +461,6 @@ func (s *Service) GetFolderView(ctx context.Context, scanID int64, request Folde
 	return s.folders.read(ctx, scanID, request)
 }
 
-func (s *Service) Config() config.Config {
-	return s.cfg
-}
-
 func isContextError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

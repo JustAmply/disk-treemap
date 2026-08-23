@@ -226,10 +226,6 @@ window.DiskTreemapApp = (() => {
     updateUrl(pathname, params, true);
   }
 
-  function pushUrl(pathname, params) {
-    updateUrl(pathname, params, false);
-  }
-
   function readExploreUrlState() {
     const params = new URLSearchParams(window.location.search);
     return {
@@ -662,7 +658,6 @@ window.DiskTreemapApp = (() => {
     isScanActive,
     logScanWarnings,
     parsePositiveInt,
-    pushUrl,
     readExploreUrlState,
     renderBreadcrumb,
     renderItemList,

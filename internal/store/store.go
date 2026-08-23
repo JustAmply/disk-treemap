@@ -674,10 +674,6 @@ func (s *Store) GetNode(ctx context.Context, scanID int64, path string) (Node, e
 	return compactRowToNode(cleanPath, compactParentPath(rootPath, cleanPath), row), nil
 }
 
-func (s *Store) ListChildren(ctx context.Context, scanID int64, parentPath string, limit int) ([]Node, error) {
-	return s.ListChildrenWithOptions(ctx, scanID, parentPath, NodeQueryOptions{Limit: limit, Sort: "size_desc"})
-}
-
 func (s *Store) AggregateChildrenWithOptions(ctx context.Context, scanID int64, parentPath string, opts NodeQueryOptions) (ChildAggregate, error) {
 	_, parentID, err := s.resolveNodeID(ctx, scanID, parentPath)
 	if err != nil {
@@ -748,10 +744,6 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 		return nil, fmt.Errorf("iterate children: %w", err)
 	}
 	return items, nil
-}
-
-func (s *Store) ListLargestInPath(ctx context.Context, scanID int64, basePath string, limit int) ([]Node, error) {
-	return s.ListLargestInPathWithOptions(ctx, scanID, basePath, NodeQueryOptions{Limit: limit, Sort: "size_desc"})
 }
 
 func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, basePath string, opts NodeQueryOptions) ([]Node, error) {
