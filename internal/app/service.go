@@ -98,6 +98,9 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 	if s.shuttingDown {
 		return 0, ErrServiceShuttingDown
 	}
+	if s.activeScanID != 0 {
+		return 0, ErrScanRunning
+	}
 
 	scanID, err := s.runs.queue(ctx, s.cfg.AnalyzeRoot)
 	if err != nil {

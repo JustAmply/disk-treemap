@@ -41,6 +41,17 @@ func OpenStore(t *testing.T, dataDir string) *store.Store {
 	return st
 }
 
+// RegisterServiceCleanup joins an asynchronous service before the store
+// cleanup registered by OpenStore runs.
+func RegisterServiceCleanup(t *testing.T, shutdown func(context.Context) error) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown service: %v", err)
+		}
+	})
+}
+
 // CompletedScan queues, runs, publishes, and finishes a completed scan
 // containing nodes, returning its scan id.
 func CompletedScan(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {

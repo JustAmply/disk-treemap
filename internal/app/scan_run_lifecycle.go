@@ -52,10 +52,16 @@ type scanRunLifecycle struct {
 	runningScanID int64
 	progress      liveProgress
 	metrics       scanRuntimeMetrics
+	maintenance   func(scanID int64)
 }
 
 func newScanRunLifecycle(st *store.Store) *scanRunLifecycle {
-	return &scanRunLifecycle{store: st}
+	lifecycle := &scanRunLifecycle{store: st}
+	lifecycle.maintenance = func(scanID int64) {
+		lifecycle.prune(scanID)
+		lifecycle.optimizeStorage(scanID)
+	}
+	return lifecycle
 }
 
 func (l *scanRunLifecycle) recover(ctx context.Context) (RecoveryReport, error) {
@@ -117,9 +123,9 @@ func (l *scanRunLifecycle) complete(scanID int64, result scan.Result) error {
 		return err
 	}
 
+	l.clearLiveState(scanID)
+	l.maintenance(scanID)
 	l.clear(scanID)
-	l.prune(scanID)
-	l.optimizeStorage(scanID)
 	return nil
 }
 
@@ -135,8 +141,9 @@ func (l *scanRunLifecycle) fail(scanID int64, scanErr error, totalBytes, totalNo
 	if err != nil {
 		log.Printf("scan #%d record failure warning: %v", scanID, err)
 	}
-	l.clear(scanID)
+	l.clearLiveState(scanID)
 	l.prune(scanID)
+	l.clear(scanID)
 }
 
 func (l *scanRunLifecycle) get(ctx context.Context, scanID int64) (store.ScanRun, error) {
@@ -274,6 +281,16 @@ func (l *scanRunLifecycle) clear(scanID int64) {
 		return
 	}
 	l.runningScanID = 0
+	l.progress = liveProgress{}
+	l.metrics = scanRuntimeMetrics{}
+}
+
+func (l *scanRunLifecycle) clearLiveState(scanID int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.runningScanID != scanID {
+		return
+	}
 	l.progress = liveProgress{}
 	l.metrics = scanRuntimeMetrics{}
 }

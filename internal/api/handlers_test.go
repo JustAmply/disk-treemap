@@ -376,6 +376,7 @@ func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
 	cfg := testsupport.TestConfig(root, dataDir)
 	st := testsupport.OpenStore(t, dataDir)
 	svc := app.NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
 	mux := http.NewServeMux()
 	h.Register(mux)

@@ -201,6 +201,7 @@ func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	start := make(chan struct{})
 	release := make(chan struct{})
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -240,6 +241,7 @@ func TestServiceShutdownCancelsActiveScanAndWaitsForPersistence(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(testsupport.TestConfig(root, dataDir), st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	scanner := &shutdownBlockingScanner{
 		started:  make(chan struct{}),
 		canceled: make(chan struct{}),
@@ -300,6 +302,7 @@ func TestServiceShutdownImmediatelyAfterStartScanWaitsForRegistration(t *testing
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(testsupport.TestConfig(root, dataDir), st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	start := make(chan struct{})
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &blockingScanner{root: root, start: start, release: make(chan struct{})}
@@ -330,6 +333,7 @@ func TestServiceRejectsStartScanAfterShutdownBegins(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(testsupport.TestConfig(root, dataDir), st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	if err := svc.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown without active scan: %v", err)
 	}
@@ -347,6 +351,7 @@ func TestServiceShutdownReturnsContextErrorOnTimeout(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(testsupport.TestConfig(root, dataDir), st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	started := make(chan struct{})
 	canceled := make(chan struct{})
 	release := make(chan struct{})
@@ -404,6 +409,7 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	reached := make(chan struct{})
 	release := make(chan struct{})
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -450,6 +456,13 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s (%s)", run.Status, run.Error)
 	}
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("join scan worker: %v", err)
+	}
+	run, err = svc.GetScanRun(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("get completed scan after join: %v", err)
+	}
 	if run.Progress != nil {
 		t.Fatalf("expected no live progress after completion")
 	}
@@ -465,6 +478,7 @@ func TestServiceFailsUnreadableScanResult(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &staticResultScanner{result: scan.Result{TotalBytes: 0, TotalNodes: 4, WarningCount: 3}}
 	})
@@ -499,6 +513,7 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &duplicateNodeScanner{root: root}
 	})
@@ -529,6 +544,7 @@ func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		// totalNodes exceeds the node channel capacity (16384 for the fixed
 		// profile) plus everything the writer consumes before the invalid
@@ -567,6 +583,7 @@ func TestScanTimeoutFailsRun(t *testing.T) {
 	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	start := make(chan struct{})
 	release := make(chan struct{})
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -592,6 +609,7 @@ func TestScanTimeoutFailsRun(t *testing.T) {
 }
 
 func TestServicePrunesToNewestCompletedScan(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -606,6 +624,7 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 	}
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &singleNodeScanner{root: root}
 	})
@@ -620,6 +639,9 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 	})
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s", run.Status)
+	}
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("join scan worker: %v", err)
 	}
 
 	current, err := svc.GetCurrentScanRun(context.Background())
@@ -641,6 +663,67 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 	}
 }
 
+func TestServiceDoesNotReplaceWorkerDuringPostRunMaintenance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	st := testsupport.OpenStore(t, dataDir)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
+
+	maintenanceStarted := make(chan struct{})
+	releaseMaintenance := make(chan struct{})
+	svc.runs.maintenance = func(int64) {
+		close(maintenanceStarted)
+		<-releaseMaintenance
+	}
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &singleNodeScanner{root: root}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
+	if run.Status != store.ScanCompleted {
+		t.Fatalf("expected completed run, got %s (%s)", run.Status, run.Error)
+	}
+	select {
+	case <-maintenanceStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-run maintenance did not start")
+	}
+
+	if _, err := svc.StartScan(context.Background()); !errors.Is(err, ErrScanRunning) {
+		t.Fatalf("expected ErrScanRunning during post-run maintenance, got %v", err)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- svc.Shutdown(context.Background()) }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before post-run maintenance completed: %v", err)
+	default:
+	}
+	close(releaseMaintenance)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not join post-run maintenance")
+	}
+
+	if _, err := st.GetScanRun(context.Background(), scanID); err != nil {
+		t.Fatalf("store unavailable after joined worker: %v", err)
+	}
+}
+
 func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -655,6 +738,7 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 	})
 
 	svc := NewService(cfg, st)
+	testsupport.RegisterServiceCleanup(t, svc.Shutdown)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &failingScanner{err: fmt.Errorf("boom")}
 	})
