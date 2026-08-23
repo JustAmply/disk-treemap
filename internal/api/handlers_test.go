@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/justamply/disk-treemap/internal/app"
-	"github.com/justamply/disk-treemap/internal/config"
 	"github.com/justamply/disk-treemap/internal/scancontrol"
 	"github.com/justamply/disk-treemap/internal/store"
+	"github.com/justamply/disk-treemap/internal/testsupport"
 )
 
 func TestBrandingAssetsUseRealTransparency(t *testing.T) {
@@ -112,8 +112,8 @@ func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
 	svc := app.NewService(cfg, st)
 	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
 	mux := http.NewServeMux()
@@ -154,9 +154,9 @@ func TestFolderViewEndpointsRejectPathOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
-	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 0, MtimeUnix: time.Now().Unix()},
 	})
 
@@ -187,9 +187,9 @@ func TestCompatibilityFolderEndpointsRemainAvailable(t *testing.T) {
 	dirPath := filepath.Join(root, "nested")
 	deepFilePath := filepath.Join(dirPath, "deep.bin")
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
-	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 100, MtimeUnix: 1},
 		{Path: dirPath, ParentPath: root, Name: "nested", Kind: "dir", SizeBytes: 60, MtimeUnix: 1},
 		{Path: deepFilePath, ParentPath: dirPath, Name: "deep.bin", Kind: "file", SizeBytes: 60, MtimeUnix: 1},
@@ -235,12 +235,12 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 	cfg.ScanProfile = scancontrol.ProfileThroughput
 	cfg.ScanProgressInterval = 125 * time.Millisecond
 
-	st := newTestStore(t, dataDir)
-	completedID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	st := testsupport.OpenStore(t, dataDir)
+	completedID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 12, MtimeUnix: time.Now().Unix()},
 	})
 	currentID, err := st.QueueRun(context.Background(), root)
@@ -292,8 +292,8 @@ func TestScansCollectionRejectsGet(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
 	svc := app.NewService(cfg, st)
 	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
 	mux := http.NewServeMux()
@@ -312,9 +312,9 @@ func TestExploreEndpointReturnsSummaryAndItems(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
-	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 30, MtimeUnix: 1},
 		{Path: filepath.Join(root, "alpha"), ParentPath: root, Name: "alpha", Kind: "dir", SizeBytes: 20, MtimeUnix: 1},
 		{Path: filepath.Join(root, "beta.log"), ParentPath: root, Name: "beta.log", Kind: "file", SizeBytes: 10, MtimeUnix: 1},
@@ -365,8 +365,8 @@ func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
 		t.Fatalf("create nested fixture: %v", err)
 	}
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
 	svc := app.NewService(cfg, st)
 	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
 	mux := http.NewServeMux()
@@ -389,8 +389,7 @@ func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
 		t.Fatal("start response did not include a scan id")
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	run := testsupport.WaitForTerminalScan(t, started.ScanID, func() (store.ScanRun, error) {
 		statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+strconv.FormatInt(started.ScanID, 10), nil)
 		statusRec := httptest.NewRecorder()
 		mux.ServeHTTP(statusRec, statusReq)
@@ -402,16 +401,10 @@ func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
 		if err := json.Unmarshal(statusRec.Body.Bytes(), &run); err != nil {
 			t.Fatalf("decode scan status: %v", err)
 		}
-		if run.Status == "completed" {
-			break
-		}
-		if run.Status == "failed" {
-			t.Fatalf("scan failed: %s", run.Error)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("scan did not complete before timeout; last status=%q", run.Status)
-		}
-		time.Sleep(10 * time.Millisecond)
+		return run, nil
+	})
+	if run.Status == store.ScanFailed {
+		t.Fatalf("scan failed: %s", run.Error)
 	}
 
 	explorePath := "/api/v1/scans/" + strconv.FormatInt(started.ScanID, 10) + "/explore?path=" + url.QueryEscape(root)
@@ -449,9 +442,9 @@ func TestDeleteScanEndpointRemoved(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
-	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 0, MtimeUnix: 1},
 	})
 
@@ -473,9 +466,9 @@ func TestDiffEndpointRemoved(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
-	scanID := createCompletedScanWithNodes(t, st, root, []store.Node{
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 0, MtimeUnix: 1},
 	})
 
@@ -497,8 +490,8 @@ func TestHistoryRedirectsToExplore(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
-	st := newTestStore(t, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
+	st := testsupport.OpenStore(t, dataDir)
 	svc := app.NewService(cfg, st)
 	h := NewHandler(svc, cfg, filepath.Join("..", "..", "web"))
 	mux := http.NewServeMux()
@@ -514,60 +507,4 @@ func TestHistoryRedirectsToExplore(t *testing.T) {
 	if location := rec.Header().Get("Location"); location != "/" {
 		t.Fatalf("expected redirect to /, got %q", location)
 	}
-}
-
-func testConfig(root, dataDir string) config.Config {
-	return config.Config{
-		AnalyzeRoot:          root,
-		DataDir:              dataDir,
-		ScanProfile:          scancontrol.ProfileFixed,
-		ScanProgressInterval: 25 * time.Millisecond,
-		MaxChildrenPerQuery:  100,
-	}
-}
-
-func newTestStore(t *testing.T, dataDir string) *store.Store {
-	t.Helper()
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = st.Close()
-	})
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	return st
-}
-
-func createCompletedScanWithNodes(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {
-	t.Helper()
-	scanID, err := st.QueueRun(context.Background(), root)
-	if err != nil {
-		t.Fatalf("create scan: %v", err)
-	}
-	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-
-	writer, err := st.BeginSnapshot(context.Background(), scanID)
-	if err != nil {
-		t.Fatalf("begin writer: %v", err)
-	}
-	if err := writer.Write(context.Background(), nodes); err != nil {
-		_ = writer.Discard()
-		t.Fatalf("insert nodes: %v", err)
-	}
-	if err := writer.Publish(); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if err := st.FinishRun(context.Background(), scanID, store.ScanOutcome{
-		Status:     store.ScanCompleted,
-		FinishedAt: time.Now().UTC(),
-		TotalNodes: int64(len(nodes)),
-	}); err != nil {
-		t.Fatalf("complete scan: %v", err)
-	}
-	return scanID
 }

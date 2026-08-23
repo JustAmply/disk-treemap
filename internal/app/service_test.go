@@ -9,10 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/justamply/disk-treemap/internal/config"
 	"github.com/justamply/disk-treemap/internal/scan"
-	"github.com/justamply/disk-treemap/internal/scancontrol"
 	"github.com/justamply/disk-treemap/internal/store"
+	"github.com/justamply/disk-treemap/internal/testsupport"
 )
 
 type blockingScanner struct {
@@ -196,16 +195,9 @@ func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	start := make(chan struct{})
@@ -231,7 +223,9 @@ func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 
 	close(release)
 
-	run := waitForScanStatus(t, st, id)
+	run := testsupport.WaitForTerminalScan(t, id, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), id)
+	})
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s (%s)", run.Status, run.Error)
 	}
@@ -241,16 +235,9 @@ func TestServiceShutdownCancelsActiveScanAndWaitsForPersistence(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	svc := NewService(testConfig(root, dataDir), st)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
 	scanner := &shutdownBlockingScanner{
 		started:  make(chan struct{}),
 		canceled: make(chan struct{}),
@@ -307,16 +294,9 @@ func TestServiceShutdownImmediatelyAfterStartScanWaitsForRegistration(t *testing
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	svc := NewService(testConfig(root, dataDir), st)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
 	start := make(chan struct{})
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
 		return &blockingScanner{root: root, start: start, release: make(chan struct{})}
@@ -343,16 +323,9 @@ func TestServiceRejectsStartScanAfterShutdownBegins(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	svc := NewService(testConfig(root, dataDir), st)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
 	if err := svc.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown without active scan: %v", err)
 	}
@@ -366,16 +339,9 @@ func TestServiceShutdownReturnsContextErrorOnTimeout(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	svc := NewService(testConfig(root, dataDir), st)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
 	started := make(chan struct{})
 	canceled := make(chan struct{})
 	release := make(chan struct{})
@@ -426,17 +392,10 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 	dataDir := t.TempDir()
 	filePath := filepath.Join(root, "example.bin")
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 	cfg.ScanProgressInterval = 10 * time.Millisecond
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	reached := make(chan struct{})
@@ -479,7 +438,9 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 
 	close(release)
 
-	run := waitForScanStatusViaService(t, svc, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return svc.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s (%s)", run.Status, run.Error)
 	}
@@ -492,16 +453,9 @@ func TestServiceFailsUnreadableScanResult(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -513,7 +467,9 @@ func TestServiceFailsUnreadableScanResult(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := waitForScanStatus(t, st, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
@@ -529,17 +485,10 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 	cfg.ScanProgressInterval = 10 * time.Millisecond
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -551,7 +500,9 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := waitForScanStatus(t, st, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
@@ -564,16 +515,9 @@ func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
@@ -589,7 +533,9 @@ func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := waitForScanStatus(t, st, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
@@ -605,17 +551,10 @@ func TestScanTimeoutFailsRun(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 	cfg.ScanTimeout = 100 * time.Millisecond
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	svc := NewService(cfg, st)
 	start := make(chan struct{})
@@ -631,7 +570,9 @@ func TestScanTimeoutFailsRun(t *testing.T) {
 
 	<-start
 
-	run := waitForScanStatus(t, st, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
@@ -644,19 +585,12 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	for i := 0; i < 3; i++ {
-		createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+		testsupport.CompletedScan(t, st, root, []store.Node{
 			{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: int64(i + 1), MtimeUnix: 1},
 		})
 	}
@@ -671,7 +605,9 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := waitForScanStatus(t, st, scanID)
+	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), scanID)
+	})
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s", run.Status)
 	}
@@ -699,18 +635,11 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	completedID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+	completedID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 10, MtimeUnix: 1},
 	})
 
@@ -724,7 +653,9 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := waitForScanStatus(t, st, failedID)
+	run := testsupport.WaitForTerminalScan(t, failedID, func() (store.ScanRun, error) {
+		return st.GetScanRun(context.Background(), failedID)
+	})
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}
@@ -749,16 +680,9 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
-	completedID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+	completedID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, Name: filepath.Base(root), Kind: "dir", SizeBytes: 1},
 	})
 	queuedID, err := st.QueueRun(context.Background(), root)
@@ -773,7 +697,7 @@ func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
 		t.Fatalf("start running run: %v", err)
 	}
 
-	svc := NewService(testConfig(root, dataDir), st)
+	svc := NewService(testsupport.TestConfig(root, dataDir), st)
 	report, err := svc.Recover(context.Background())
 	if err != nil {
 		t.Fatalf("recover service: %v", err)
@@ -805,20 +729,13 @@ func TestGetFolderViewReturnsBoundedTreeAndHiddenBucket(t *testing.T) {
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
-	cfg := testConfig(root, dataDir)
+	cfg := testsupport.TestConfig(root, dataDir)
 	cfg.MaxChildrenPerQuery = 2
 
-	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
-	if err := st.Init(context.Background()); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	st := testsupport.OpenStore(t, dataDir)
 
 	dirPath := filepath.Join(root, "docs")
-	scanID := createCompletedScanWithNodesForServiceTest(t, st, root, []store.Node{
+	scanID := testsupport.CompletedScan(t, st, root, []store.Node{
 		{Path: root, ParentPath: "", Name: filepath.Base(root), Kind: "dir", SizeBytes: 101, MtimeUnix: 1},
 		{Path: filepath.Join(root, "video.mkv"), ParentPath: root, Name: "video.mkv", Kind: "file", SizeBytes: 60, MtimeUnix: 1},
 		{Path: dirPath, ParentPath: root, Name: "docs", Kind: "dir", SizeBytes: 40, MtimeUnix: 1},
@@ -926,76 +843,4 @@ func TestFolderViewNormalizesLimitsAndRejectsInvalidFilters(t *testing.T) {
 	if normalized.Limit != 2 || normalized.Sort != "size_desc" {
 		t.Fatalf("unexpected normalized request: %+v", normalized)
 	}
-}
-
-func testConfig(root, dataDir string) config.Config {
-	return config.Config{
-		AnalyzeRoot:          root,
-		DataDir:              dataDir,
-		ScanProfile:          scancontrol.ProfileFixed,
-		ScanProgressInterval: 25 * time.Millisecond,
-		MaxChildrenPerQuery:  100,
-	}
-}
-
-func waitForScanStatus(t *testing.T, st *store.Store, scanID int64) store.ScanRun {
-	t.Helper()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		run, err := st.GetScanRun(context.Background(), scanID)
-		if err == nil && (run.Status == "completed" || run.Status == "failed") {
-			return run
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("scan did not complete in time")
-	return store.ScanRun{}
-}
-
-func waitForScanStatusViaService(t *testing.T, svc *Service, scanID int64) store.ScanRun {
-	t.Helper()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		run, err := svc.GetScanRun(context.Background(), scanID)
-		if err == nil && (run.Status == "completed" || run.Status == "failed") {
-			return run
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("scan did not complete in time")
-	return store.ScanRun{}
-}
-
-func createCompletedScanWithNodesForServiceTest(t *testing.T, st *store.Store, root string, nodes []store.Node) int64 {
-	t.Helper()
-
-	scanID, err := st.QueueRun(context.Background(), root)
-	if err != nil {
-		t.Fatalf("create scan: %v", err)
-	}
-	if err := st.StartRun(context.Background(), scanID, time.Now().UTC()); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-
-	writer, err := st.BeginSnapshot(context.Background(), scanID)
-	if err != nil {
-		t.Fatalf("begin writer: %v", err)
-	}
-	if err := writer.Write(context.Background(), nodes); err != nil {
-		_ = writer.Discard()
-		t.Fatalf("insert nodes: %v", err)
-	}
-	if err := writer.Publish(); err != nil {
-		t.Fatalf("commit writer: %v", err)
-	}
-	if err := st.FinishRun(context.Background(), scanID, store.ScanOutcome{
-		Status:     store.ScanCompleted,
-		FinishedAt: time.Now().UTC(),
-		TotalNodes: int64(len(nodes)),
-	}); err != nil {
-		t.Fatalf("complete scan: %v", err)
-	}
-	return scanID
 }
