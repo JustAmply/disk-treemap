@@ -43,6 +43,20 @@ func (b *blockingScanner) Scan(ctx context.Context, cb scan.NodeCallback) (scan.
 	return scan.Result{TotalBytes: 1, TotalNodes: 1}, nil
 }
 
+type shutdownBlockingScanner struct {
+	started  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+}
+
+func (s *shutdownBlockingScanner) Scan(ctx context.Context, _ scan.NodeCallback) (scan.Result, error) {
+	close(s.started)
+	<-ctx.Done()
+	close(s.canceled)
+	<-s.release
+	return scan.Result{}, ctx.Err()
+}
+
 type progressScanner struct {
 	root      string
 	firstPath string
@@ -220,6 +234,190 @@ func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 	run := waitForScanStatus(t, st, id)
 	if run.Status != "completed" {
 		t.Fatalf("expected completed, got %s (%s)", run.Status, run.Error)
+	}
+}
+
+func TestServiceShutdownCancelsActiveScanAndWaitsForPersistence(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(testConfig(root, dataDir), st)
+	scanner := &shutdownBlockingScanner{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	svc.SetScannerFactoryForTests(func(string, int) scan.Engine { return scanner })
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanner did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- svc.Shutdown(context.Background()) }()
+	select {
+	case <-scanner.canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not cancel scanner")
+	}
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before scan completion: %v", err)
+	default:
+	}
+
+	close(scanner.release)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not wait for scan completion")
+	}
+
+	run, err := st.GetScanRun(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("get scan run after shutdown: %v", err)
+	}
+	if run.Status != store.ScanFailed {
+		t.Fatalf("expected failed run after shutdown, got %s (%s)", run.Status, run.Error)
+	}
+	if !strings.Contains(run.Error, context.Canceled.Error()) {
+		t.Fatalf("expected cancellation error after shutdown, got %q", run.Error)
+	}
+}
+
+func TestServiceShutdownImmediatelyAfterStartScanWaitsForRegistration(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(testConfig(root, dataDir), st)
+	start := make(chan struct{})
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &blockingScanner{root: root, start: start, release: make(chan struct{})}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	run, err := st.GetScanRun(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("get scan run after immediate shutdown: %v", err)
+	}
+	if run.Status != store.ScanFailed {
+		t.Fatalf("expected failed run after immediate shutdown, got %s (%s)", run.Status, run.Error)
+	}
+}
+
+func TestServiceRejectsStartScanAfterShutdownBegins(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(testConfig(root, dataDir), st)
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown without active scan: %v", err)
+	}
+
+	if _, err := svc.StartScan(context.Background()); !errors.Is(err, ErrServiceShuttingDown) {
+		t.Fatalf("expected ErrServiceShuttingDown, got %v", err)
+	}
+}
+
+func TestServiceShutdownReturnsContextErrorOnTimeout(t *testing.T) {
+	root := t.TempDir()
+	dataDir := t.TempDir()
+
+	st, err := store.Open(filepath.Join(dataDir, "scan.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	if err := st.Init(context.Background()); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	svc := NewService(testConfig(root, dataDir), st)
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	svc.SetScannerFactoryForTests(func(root string, _ int) scan.Engine {
+		return &shutdownBlockingScanner{started: started, canceled: canceled, release: release}
+	})
+
+	scanID, err := svc.StartScan(context.Background())
+	if err != nil {
+		t.Fatalf("start scan: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanner did not start")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- svc.Shutdown(shutdownCtx)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not cancel scanner")
+	}
+	if err := <-shutdownDone; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected shutdown deadline error, got %v", err)
+	}
+
+	close(release)
+	if err := svc.Shutdown(context.Background()); err != nil {
+		t.Fatalf("finish shutdown: %v", err)
+	}
+	run, err := st.GetScanRun(context.Background(), scanID)
+	if err != nil {
+		t.Fatalf("get scan run after shutdown: %v", err)
+	}
+	if run.Status != store.ScanFailed {
+		t.Fatalf("expected failed run after shutdown, got %s (%s)", run.Status, run.Error)
 	}
 }
 

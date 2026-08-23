@@ -29,7 +29,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
 
 	if err := st.Init(context.Background()); err != nil {
 		log.Fatalf("init store: %v", err)
@@ -76,5 +75,12 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
+	}
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		log.Printf("scan shutdown error: %v", err)
+		return
+	}
+	if err := st.Close(); err != nil {
+		log.Printf("close store: %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 const minProgressInterval = 10 * time.Millisecond
 
 var (
-	ErrScanRunning  = errors.New("scan already running")
-	ErrInvalidInput = errors.New("invalid input")
+	ErrScanRunning         = errors.New("scan already running")
+	ErrServiceShuttingDown = errors.New("service is shutting down")
+	ErrInvalidInput        = errors.New("invalid input")
 )
 
 type scannerFactory func(root string, maxConcurrency int) scan.Engine
@@ -64,6 +66,12 @@ type Service struct {
 	runs        *scanRunLifecycle
 	folders     *folderView
 	makeScanner scannerFactory
+
+	lifecycleMu      sync.Mutex
+	activeScanID     int64
+	activeScanCancel context.CancelFunc
+	activeScanDone   chan struct{}
+	shuttingDown     bool
 }
 
 func NewService(cfg config.Config, st *store.Store) *Service {
@@ -84,10 +92,23 @@ func (s *Service) SetScannerFactoryForTests(factory scannerFactory) {
 }
 
 func (s *Service) StartScan(ctx context.Context) (int64, error) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
+	if s.shuttingDown {
+		return 0, ErrServiceShuttingDown
+	}
+
 	scanID, err := s.runs.queue(ctx, s.cfg.AnalyzeRoot)
 	if err != nil {
 		return 0, err
 	}
+
+	scanCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.activeScanID = scanID
+	s.activeScanCancel = cancel
+	s.activeScanDone = done
 
 	limits := scancontrol.New(s.cfg.ScanProfile).Limits()
 	log.Printf(
@@ -101,19 +122,23 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 		limits.Min.BatchSize,
 		limits.Max.BatchSize,
 	)
-	go s.runScan(scanID)
+	go s.runScan(scanID, scanCtx, cancel, done)
 	return scanID, nil
 }
 
-func (s *Service) runScan(scanID int64) {
-	ctx := context.Background()
-	if err := s.runs.start(ctx, scanID); err != nil {
+func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel context.CancelFunc, done chan struct{}) {
+	defer func() {
+		runCancel()
+		s.finishActiveScan(scanID, done)
+	}()
+
+	if err := s.runs.start(runCtx, scanID); err != nil {
 		s.runs.fail(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
 		return
 	}
 	log.Printf("scan #%d running", scanID)
 
-	scanCtxBase, cancelBase := context.WithCancel(context.Background())
+	scanCtxBase, cancelBase := context.WithCancel(runCtx)
 	defer cancelBase()
 
 	scanCtx := scanCtxBase
@@ -217,6 +242,43 @@ func (s *Service) runScan(scanID int64) {
 		return
 	}
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
+}
+
+func (s *Service) finishActiveScan(scanID int64, done chan struct{}) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.activeScanID == scanID {
+		close(done)
+		s.activeScanID = 0
+		s.activeScanCancel = nil
+		s.activeScanDone = nil
+		return
+	}
+	close(done)
+}
+
+// Shutdown prevents new scans, cancels the active scan, and waits for its
+// worker to finish persisting its terminal state.
+func (s *Service) Shutdown(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	s.shuttingDown = true
+	cancel := s.activeScanCancel
+	done := s.activeScanDone
+	s.lifecycleMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return nil
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) runNodeWriter(
