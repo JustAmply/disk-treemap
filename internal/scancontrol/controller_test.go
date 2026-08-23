@@ -8,6 +8,7 @@ import (
 )
 
 func TestProfilesResolveToValidSettings(t *testing.T) {
+	t.Parallel()
 	for _, profile := range []Profile{ProfileBalanced, ProfileThroughput, ProfileLowImpact, ProfileFixed} {
 		limits := profile.Limits(8)
 		if limits.Initial.Concurrency < limits.Min.Concurrency || limits.Initial.Concurrency > limits.Max.Concurrency {
@@ -23,12 +24,14 @@ func TestProfilesResolveToValidSettings(t *testing.T) {
 }
 
 func TestParseProfileRejectsUnknownValue(t *testing.T) {
+	t.Parallel()
 	if _, err := ParseProfile("turbo"); err == nil {
 		t.Fatalf("expected invalid profile error")
 	}
 }
 
 func TestControllerRunAdditivelyIncreasesHealthyConcurrency(t *testing.T) {
+	t.Parallel()
 	target := newSequenceTarget([]Snapshot{
 		{Active: true, Settings: Settings{Concurrency: 4, BatchSize: 2048}, WrittenNodes: 100, EnqueuedNodes: 100, QueueOccupancy: 0.2},
 		{Active: true, Settings: Settings{Concurrency: 4, BatchSize: 2048}, WrittenNodes: 200, EnqueuedNodes: 200, QueueOccupancy: 0.2},
@@ -40,6 +43,7 @@ func TestControllerRunAdditivelyIncreasesHealthyConcurrency(t *testing.T) {
 }
 
 func TestControllerRunHalvesConcurrencyAfterSustainedCongestion(t *testing.T) {
+	t.Parallel()
 	target := newSequenceTarget([]Snapshot{
 		{Active: true, Settings: Settings{Concurrency: 8, BatchSize: 2048}, WrittenNodes: 100, EnqueuedNodes: 100, QueueOccupancy: 0.9},
 		{Active: true, Settings: Settings{Concurrency: 8, BatchSize: 2048}, WrittenNodes: 200, EnqueuedNodes: 240, QueueOccupancy: 0.95},
@@ -52,6 +56,7 @@ func TestControllerRunHalvesConcurrencyAfterSustainedCongestion(t *testing.T) {
 }
 
 func TestControllerRunReducesBatchAfterSlowFlush(t *testing.T) {
+	t.Parallel()
 	target := newSequenceTarget([]Snapshot{
 		{Active: true, Settings: Settings{Concurrency: 4, BatchSize: 4096}, WrittenNodes: 100, EnqueuedNodes: 100, FlushCount: 1, QueueOccupancy: 0.4},
 		{Active: true, Settings: Settings{Concurrency: 4, BatchSize: 4096}, WrittenNodes: 200, EnqueuedNodes: 200, FlushCount: 2, LastFlushDuration: 3 * time.Second, QueueOccupancy: 0.4},

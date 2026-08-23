@@ -9,6 +9,7 @@ import (
 )
 
 func TestNormalizeWithinRoot_DefaultRoot(t *testing.T) {
+	t.Parallel()
 	root := filepath.Clean(t.TempDir())
 	got, err := NormalizeWithinRoot(root, "")
 	if err != nil {
@@ -20,6 +21,7 @@ func TestNormalizeWithinRoot_DefaultRoot(t *testing.T) {
 }
 
 func TestNormalizeWithinRoot_RejectsRelativePath(t *testing.T) {
+	t.Parallel()
 	root := filepath.Clean(t.TempDir())
 	_, err := NormalizeWithinRoot(root, "relative/path")
 	if !errors.Is(err, ErrPathNotAbsolute) {
@@ -28,6 +30,7 @@ func TestNormalizeWithinRoot_RejectsRelativePath(t *testing.T) {
 }
 
 func TestNormalizeWithinRoot_RejectsOutsideRoot(t *testing.T) {
+	t.Parallel()
 	root := filepath.Clean(t.TempDir())
 	outside := filepath.Clean(filepath.Join(root, ".."))
 	_, err := NormalizeWithinRoot(root, outside)
@@ -37,6 +40,7 @@ func TestNormalizeWithinRoot_RejectsOutsideRoot(t *testing.T) {
 }
 
 func TestNormalizeWithinRoot_AcceptsRootPrefixCaseVariation(t *testing.T) {
+	t.Parallel()
 	if os.PathSeparator != '\\' {
 		t.Skip("drive-letter and path case folding is a Windows path behavior")
 	}
@@ -59,6 +63,7 @@ func TestNormalizeWithinRoot_AcceptsRootPrefixCaseVariation(t *testing.T) {
 }
 
 func TestNormalizeWithinRoot_RejectsCaseVariantOfDifferentDirectory(t *testing.T) {
+	t.Parallel()
 	root := filepath.Clean(t.TempDir())
 	variant := strings.ToLower(root) + "-sibling"
 	_, err := NormalizeWithinRoot(root, variant)

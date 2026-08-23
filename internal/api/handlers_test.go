@@ -22,6 +22,7 @@ import (
 )
 
 func TestBrandingAssetsUseRealTransparency(t *testing.T) {
+	t.Parallel()
 	for _, asset := range []string{
 		filepath.Join("..", "..", "web", "assets", "disk-treemap-logo.png"),
 		filepath.Join("..", "..", "web", "assets", "favicon.png"),
@@ -109,6 +110,7 @@ func hasTransparentNeighbor(img image.Image, x, y int) bool {
 }
 
 func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -151,6 +153,7 @@ func TestStaticIndexReferencesBrandingAssets(t *testing.T) {
 }
 
 func TestFolderViewEndpointsRejectPathOutsideRoot(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -182,6 +185,7 @@ func TestFolderViewEndpointsRejectPathOutsideRoot(t *testing.T) {
 }
 
 func TestCompatibilityFolderEndpointsRemainAvailable(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 	dirPath := filepath.Join(root, "nested")
@@ -232,6 +236,7 @@ func TestCompatibilityFolderEndpointsRemainAvailable(t *testing.T) {
 }
 
 func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -289,6 +294,7 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 }
 
 func TestScansCollectionRejectsGet(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -309,6 +315,7 @@ func TestScansCollectionRejectsGet(t *testing.T) {
 }
 
 func TestExploreEndpointReturnsSummaryAndItems(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -352,6 +359,7 @@ func TestExploreEndpointReturnsSummaryAndItems(t *testing.T) {
 }
 
 func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 	dirPath := filepath.Join(root, "nested")
@@ -439,6 +447,7 @@ func TestScanLifecycleFromHTTPToExplore(t *testing.T) {
 }
 
 func TestDeleteScanEndpointRemoved(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -463,6 +472,7 @@ func TestDeleteScanEndpointRemoved(t *testing.T) {
 }
 
 func TestDiffEndpointRemoved(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -487,6 +497,7 @@ func TestDiffEndpointRemoved(t *testing.T) {
 }
 
 func TestHistoryRedirectsToExplore(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 

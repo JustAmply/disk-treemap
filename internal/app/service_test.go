@@ -192,6 +192,7 @@ func (m *midStreamWriterFailureScanner) Scan(ctx context.Context, cb scan.NodeCa
 }
 
 func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -232,6 +233,7 @@ func TestServiceAllowsOnlyOneRunningScan(t *testing.T) {
 }
 
 func TestServiceShutdownCancelsActiveScanAndWaitsForPersistence(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -291,6 +293,7 @@ func TestServiceShutdownCancelsActiveScanAndWaitsForPersistence(t *testing.T) {
 }
 
 func TestServiceShutdownImmediatelyAfterStartScanWaitsForRegistration(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -320,6 +323,7 @@ func TestServiceShutdownImmediatelyAfterStartScanWaitsForRegistration(t *testing
 }
 
 func TestServiceRejectsStartScanAfterShutdownBegins(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -336,6 +340,7 @@ func TestServiceRejectsStartScanAfterShutdownBegins(t *testing.T) {
 }
 
 func TestServiceShutdownReturnsContextErrorOnTimeout(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -388,6 +393,7 @@ func TestServiceShutdownReturnsContextErrorOnTimeout(t *testing.T) {
 }
 
 func TestGetScanRunIncludesLiveProgress(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 	filePath := filepath.Join(root, "example.bin")
@@ -450,6 +456,7 @@ func TestGetScanRunIncludesLiveProgress(t *testing.T) {
 }
 
 func TestServiceFailsUnreadableScanResult(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -482,6 +489,7 @@ func TestServiceFailsUnreadableScanResult(t *testing.T) {
 }
 
 func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -512,6 +520,7 @@ func TestServiceFailsWhenWriterReturnsError(t *testing.T) {
 }
 
 func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -548,6 +557,7 @@ func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
 }
 
 func TestScanTimeoutFailsRun(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -632,6 +642,7 @@ func TestServicePrunesToNewestCompletedScan(t *testing.T) {
 }
 
 func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -678,6 +689,7 @@ func TestServiceKeepsLastCompletedWhenNewerScanFails(t *testing.T) {
 }
 
 func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 	st := testsupport.OpenStore(t, dataDir)
@@ -726,6 +738,7 @@ func TestServiceRecoverFailsInterruptedRunsAndAppliesRetention(t *testing.T) {
 }
 
 func TestGetFolderViewReturnsBoundedTreeAndHiddenBucket(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
 
@@ -792,6 +805,7 @@ func TestGetFolderViewReturnsBoundedTreeAndHiddenBucket(t *testing.T) {
 }
 
 func TestFolderViewTreemapEnforcesServerNodeBudget(t *testing.T) {
+	t.Parallel()
 	root := filepath.Clean(t.TempDir())
 	items := make([]store.Node, 260)
 	for i := range items {
@@ -823,6 +837,7 @@ func TestFolderViewTreemapEnforcesServerNodeBudget(t *testing.T) {
 }
 
 func TestFolderViewNormalizesLimitsAndRejectsInvalidFilters(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	view := newFolderView(root, 10, nil)
 

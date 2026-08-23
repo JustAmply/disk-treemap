@@ -13,6 +13,7 @@ import (
 )
 
 func TestListChildrenSortedBySizeThenName(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
@@ -36,6 +37,7 @@ func TestListChildrenSortedBySizeThenName(t *testing.T) {
 }
 
 func TestListChildrenWithFilters(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
 		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 50},
@@ -72,6 +74,7 @@ func TestListChildrenWithFilters(t *testing.T) {
 }
 
 func TestAggregateChildrenWithOptions(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
 		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 75},
@@ -98,6 +101,7 @@ func TestAggregateChildrenWithOptions(t *testing.T) {
 }
 
 func TestGetNodeResolvesDeepCompactPath(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	root := "/scanroot"
 	dirPath := filepath.Join(root, "a", "b")
@@ -120,6 +124,7 @@ func TestGetNodeResolvesDeepCompactPath(t *testing.T) {
 }
 
 func TestListLargestInPathFindsDeepDescendants(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	root := "/scanroot"
 	dirPath := filepath.Join(root, "media", "nested")
@@ -147,6 +152,7 @@ func TestListLargestInPathFindsDeepDescendants(t *testing.T) {
 }
 
 func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	root := "/scanroot"
 
@@ -165,6 +171,7 @@ func TestListLargestInPathReturnsEmptyForMissingBasePath(t *testing.T) {
 }
 
 func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	scanID, err := st.QueueRun(context.Background(), "/scanroot")
@@ -201,6 +208,7 @@ func TestSnapshotWriterPublishesMultipleNodes(t *testing.T) {
 }
 
 func TestRunTransitionsRejectInvalidOrder(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	ctx := context.Background()
 
@@ -239,6 +247,7 @@ func TestRunTransitionsRejectInvalidOrder(t *testing.T) {
 }
 
 func TestSnapshotWriterSupportsParentInLaterBatch(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	scanID, err := st.QueueRun(context.Background(), "/scanroot")
@@ -277,6 +286,7 @@ func TestSnapshotWriterSupportsParentInLaterBatch(t *testing.T) {
 }
 
 func TestSnapshotWriterRejectsMissingParentOnPublish(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	scanID, err := st.QueueRun(context.Background(), "/scanroot")
@@ -303,6 +313,7 @@ func TestSnapshotWriterRejectsMissingParentOnPublish(t *testing.T) {
 }
 
 func TestSnapshotWriterChunksBeyondSQLiteParameterLimit(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	scanID, err := st.QueueRun(context.Background(), "/scanroot")
@@ -346,6 +357,7 @@ func TestSnapshotWriterChunksBeyondSQLiteParameterLimit(t *testing.T) {
 }
 
 func TestCompactSchemaIsSmallerForDeepPaths(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "scanroot")
 	nodes := syntheticDeepPathNodes(root, 1200)
 
@@ -379,6 +391,7 @@ func TestCompactSchemaIsSmallerForDeepPaths(t *testing.T) {
 }
 
 func TestInitReplacesLegacyDatabaseWithEmptyCompactStore(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "scanroot")
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 	insertLegacyFixture(t, dbPath, root, []Node{
@@ -408,6 +421,7 @@ func TestInitReplacesLegacyDatabaseWithEmptyCompactStore(t *testing.T) {
 }
 
 func TestInitDiscardsOnlyRunsBackedByLegacyNodes(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	root := filepath.Join(t.TempDir(), "scanroot")
 	compactID := insertCompletedScan(t, st, root, []Node{
@@ -464,6 +478,7 @@ func TestInitDiscardsOnlyRunsBackedByLegacyNodes(t *testing.T) {
 }
 
 func TestPruneOperationalScansKeepsLatestAndLatestCompleted(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	olderCompleted := insertCompletedScan(t, st, "/scanroot", []Node{
@@ -514,6 +529,7 @@ func TestPruneOperationalScansKeepsLatestAndLatestCompleted(t *testing.T) {
 }
 
 func TestFailInterruptedScansMarksQueuedAndRunningAsFailed(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 
 	completedID := insertCompletedScan(t, st, "/scanroot", []Node{
@@ -567,6 +583,7 @@ func TestFailInterruptedScansMarksQueuedAndRunningAsFailed(t *testing.T) {
 }
 
 func TestListLargestInPathWithOptionsSupportsSort(t *testing.T) {
+	t.Parallel()
 	st := newTestStore(t)
 	scanID := insertCompletedScan(t, st, "/scanroot", []Node{
 		{Path: "/scanroot", ParentPath: "", Name: "scanroot", Kind: "dir", SizeBytes: 100},
@@ -715,6 +732,7 @@ func insertCompletedScanBenchmark(b *testing.B, st *Store, root string, nodes []
 }
 
 func TestNormalizeSortDefaultsToSizeDesc(t *testing.T) {
+	t.Parallel()
 	if got := normalizeSort("invalid"); !strings.Contains(got, "size_bytes DESC") {
 		t.Fatalf("expected fallback sort, got %q", got)
 	}

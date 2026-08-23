@@ -13,6 +13,7 @@ import (
 )
 
 func TestScannerComputesDirectorySizesAndSkipsSymlinks(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
 		t.Fatal(err)
@@ -52,6 +53,7 @@ func TestScannerComputesDirectorySizesAndSkipsSymlinks(t *testing.T) {
 }
 
 func TestScannerPermissionDeniedIsNonFatal(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("permission behavior is not portable on windows")
 	}
