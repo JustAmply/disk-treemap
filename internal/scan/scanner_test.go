@@ -28,7 +28,10 @@ func TestScannerComputesDirectorySizesAndSkipsSymlinks(t *testing.T) {
 
 	s := New(root, 4)
 	nodes := make(map[string]NodeRecord)
+	var nodesMu sync.Mutex
 	result, err := s.Scan(context.Background(), func(node NodeRecord) error {
+		nodesMu.Lock()
+		defer nodesMu.Unlock()
 		nodes[node.Path] = node
 		return nil
 	})
