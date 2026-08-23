@@ -42,8 +42,10 @@ jobs:
 
       - name: Run vet
         run: go vet ./...
-      - name: Run tests
-        run: go test ./...
+      - name: Run tests with race detector
+        run: go test -race -shuffle=on -coverprofile=coverage.out ./...
+      - name: Report aggregate coverage
+        run: go tool cover -func=coverage.out
 
   docker-check:
     runs-on: ubuntu-latest
