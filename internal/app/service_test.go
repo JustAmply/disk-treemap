@@ -558,9 +558,9 @@ func TestServiceFailsWhenWriterFailsMidStream(t *testing.T) {
 		t.Fatalf("start scan: %v", err)
 	}
 
-	run := testsupport.WaitForTerminalScan(t, scanID, func() (store.ScanRun, error) {
+	run := testsupport.WaitForTerminalScanWithin(t, scanID, func() (store.ScanRun, error) {
 		return st.GetScanRun(context.Background(), scanID)
-	})
+	}, 20*time.Second)
 	if run.Status != "failed" {
 		t.Fatalf("expected failed, got %s", run.Status)
 	}

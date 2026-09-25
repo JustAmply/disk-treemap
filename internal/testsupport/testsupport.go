@@ -90,7 +90,13 @@ func CompletedScan(t *testing.T, st *store.Store, root string, nodes []store.Nod
 // status (completed or failed).
 func WaitForTerminalScan(t *testing.T, scanID int64, getRun func() (store.ScanRun, error)) store.ScanRun {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	return WaitForTerminalScanWithin(t, scanID, getRun, 5*time.Second)
+}
+
+// WaitForTerminalScanWithin uses a caller-supplied deadline for slower scan fixtures.
+func WaitForTerminalScanWithin(t *testing.T, scanID int64, getRun func() (store.ScanRun, error), timeout time.Duration) store.ScanRun {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	var lastRun store.ScanRun
 	var lastErr error
 	for time.Now().Before(deadline) {
