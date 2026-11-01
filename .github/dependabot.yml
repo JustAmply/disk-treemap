@@ -5,8 +5,8 @@ multi-ecosystem-groups:
   infrastructure:
     schedule:
       interval: "weekly"
-      day: "tuesday"
-      time: "08:00"
+      day: "monday"
+      time: "06:00"
       timezone: "Europe/Berlin"
     commit-message:
       prefix: "deps(infra)"
@@ -18,10 +18,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-      day: "tuesday"
-      time: "08:00"
+      day: "monday"
+      time: "06:00"
       timezone: "Europe/Berlin"
     open-pull-requests-limit: 2
+    cooldown:
+      semver-major-days: 7
+      semver-minor-days: 3
+      semver-patch-days: 2
     commit-message:
       prefix: "deps(go)"
     pull-request-branch-name:
@@ -45,10 +49,14 @@ updates:
 
   - package-ecosystem: "docker"
     directory: "/"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     patterns:
       - "*"
     multi-ecosystem-group: "infrastructure"
+    cooldown:
+      semver-major-days: 7
+      semver-minor-days: 3
+      semver-patch-days: 2
     groups:
       docker-security:
         applies-to: "security-updates"
@@ -57,10 +65,14 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
-    open-pull-requests-limit: 1
+    open-pull-requests-limit: 2
     patterns:
       - "*"
     multi-ecosystem-group: "infrastructure"
+    cooldown:
+      semver-major-days: 7
+      semver-minor-days: 3
+      semver-patch-days: 2
     groups:
       github-actions-security:
         applies-to: "security-updates"
