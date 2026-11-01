@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"iter"
 	"log"
 	"os"
 	"path/filepath"
@@ -185,6 +186,50 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		TotalNodes:   totalNodes,
 		WarningCount: warnings,
 	}, nil
+}
+
+// ScanSeq provides a modern Go 1.23+ push iterator yielding NodeRecords.
+// Iteration can be terminated early by the caller via standard break statements.
+func (s *Scanner) ScanSeq(ctx context.Context) iter.Seq2[NodeRecord, error] {
+	return func(yield func(NodeRecord, error) bool) {
+		scanCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		type scanItem struct {
+			rec NodeRecord
+			err error
+		}
+
+		ch := make(chan scanItem, 64)
+
+		go func() {
+			defer close(ch)
+			_, err := s.Scan(scanCtx, func(rec NodeRecord) error {
+				select {
+				case <-scanCtx.Done():
+					return scanCtx.Err()
+				case ch <- scanItem{rec: rec}:
+					return nil
+				}
+			})
+			if err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case <-scanCtx.Done():
+				case ch <- scanItem{err: err}:
+				}
+			}
+		}()
+
+		for item := range ch {
+			if item.err != nil {
+				yield(NodeRecord{}, item.err)
+				return
+			}
+			if !yield(item.rec, nil) {
+				return
+			}
+		}
+	}
 }
 
 func (s *Scanner) scanNode(

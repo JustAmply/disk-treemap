@@ -201,3 +201,39 @@ func writeSizedFile(t *testing.T, path string, size int) {
 		t.Fatalf("write file %s: %v", path, err)
 	}
 }
+
+func TestScanner_ScanSeq(t *testing.T) {
+	tmp := t.TempDir()
+	writeSizedFile(t, filepath.Join(tmp, "a.txt"), 100)
+	writeSizedFile(t, filepath.Join(tmp, "b.txt"), 200)
+
+	s := New(tmp, 2)
+	ctx := context.Background()
+
+	var records []NodeRecord
+	for rec, err := range s.ScanSeq(ctx) {
+		if err != nil {
+			t.Fatalf("unexpected iterator error: %v", err)
+		}
+		records = append(records, rec)
+	}
+
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 records, got %d", len(records))
+	}
+
+	// Test early break support
+	breakCount := 0
+	for _, err := range s.ScanSeq(ctx) {
+		if err != nil {
+			t.Fatalf("unexpected error before break: %v", err)
+		}
+		breakCount++
+		if breakCount == 1 {
+			break
+		}
+	}
+	if breakCount != 1 {
+		t.Fatalf("expected early break after 1 record, got %d", breakCount)
+	}
+}
