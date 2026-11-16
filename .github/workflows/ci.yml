@@ -42,6 +42,11 @@ jobs:
 
       - name: Run vet
         run: go vet ./...
+      - name: Check frontend syntax and behavior
+        run: |
+          node --check web/app.js
+          node --check web/explore.js
+          node --test scripts/frontend.test.cjs
       - name: Run tests with race detector
         run: go test -race -shuffle=on -coverprofile=coverage.out ./...
       - name: Report aggregate coverage

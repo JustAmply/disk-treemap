@@ -47,6 +47,13 @@ try {
     }
 
     Write-Host "All Go checks passed."
+
+    & node --check web/app.js
+    if ($LASTEXITCODE -ne 0) { throw "Frontend syntax check failed." }
+    & node --check web/explore.js
+    if ($LASTEXITCODE -ne 0) { throw "Frontend syntax check failed." }
+    & node --test scripts/frontend.test.cjs
+    if ($LASTEXITCODE -ne 0) { throw "Frontend regression tests failed." }
 }
 finally {
     foreach ($name in $environmentNames) {

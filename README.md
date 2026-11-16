@@ -55,13 +55,13 @@ Then open [http://localhost:8080](http://localhost:8080).
 
 ## Development checks
 
-Use the Go version declared in `go.mod`. On PowerShell, run the complete local feedback loop with:
+Use the Go version declared in `go.mod` and Node.js 22 or newer. On PowerShell, run the complete local feedback loop with:
 
 ```powershell
 ./scripts/check.ps1
 ```
 
-The script checks Go formatting, runs `go vet`, and executes the full test suite. It keeps Go caches and telemetry state in ignored workspace directories so the same command also works in restricted development environments.
+The script checks Go formatting, runs `go vet`, executes the Go test suite, and checks frontend syntax and regression tests. It keeps Go caches and telemetry state in ignored workspace directories so the same command also works in restricted development environments.
 
 ## What It Does
 
@@ -71,6 +71,11 @@ The script checks Go formatting, runs `go vet`, and executes the full test suite
 - Filters the current view by name, type, minimum size, and sort order
 - Keeps browsing limited to one configured root path
 - Persists scan data across restarts when `DATA_DIR` is backed by a volume
+- Retains recent snapshots and compares added, removed, and changed paths
+- Searches recursively, summarizes file extensions, and exports CSV or JSON
+- Pages through large folders and filters by extension and modification date
+- Reports unreadable paths and exclusions, and supports cancelling a running scan
+- Shows allocated file storage on Linux, with hardlinks counted once per scan
 
 ## First Use
 
@@ -125,6 +130,26 @@ Notes:
 | `SCAN_PROFILE` | No | `balanced` | Scan control profile: `balanced`, `throughput`, `low-impact`, or `fixed` |
 | `SCAN_TIMEOUT` | No | `0` | Maximum scan duration in seconds; `0` disables the timeout |
 | `MAX_CHILDREN_PER_QUERY` | No | `500` | Maximum number of direct child items returned for a folder view |
+| `SNAPSHOT_RETENTION` | No | `10` | Number of completed snapshots to retain; minimum `1` |
+| `SCAN_EXCLUDE` | No | `[]` | JSON array of relative glob patterns, e.g. `["cache","downloads/*.tmp"]` |
+| `AUTH_USERNAME` | No | none | Optional HTTP Basic authentication username; requires `AUTH_PASSWORD` |
+| `AUTH_PASSWORD` | No | none | Optional HTTP Basic authentication password; requires `AUTH_USERNAME` |
+
+### Snapshot analysis and scan coverage
+
+Select a retained snapshot to browse its contents. Compare it with another snapshot to see added, removed, and modified paths, ordered by absolute size change. Directory changes include descendant sizes, so summing all comparison rows would double count changes. Comparisons use sizes, types, and modification times, not content hashes.
+
+Use the analysis controls to search the entire root, summarize extensions within the current subtree, or export matching entries. Folder exports include direct children; recursive exports include descendants. Date filters use modification time, not last access time. CSV exports neutralize spreadsheet formula prefixes in paths.
+
+Scan coverage lists unreadable paths and configured exclusions. An incomplete folder's size is only the readable portion. Excluded entries remain marked in the folder listing with zero included bytes; their contents are not traversed. Patterns without `/` match basenames at any depth; patterns with `/` match root-relative paths. Use `/` on every platform. `*`, `?`, and character classes are supported, but `**`, absolute paths, and `..` are rejected. Changed patterns apply to the next scan and are recorded with that snapshot.
+
+Allocated storage is available on Linux and measures file data blocks, excluding directory overhead. Sparse files can occupy less storage than their logical size. Hardlinks are counted once per scan and attributed to the first encountered link, so attribution between folders can vary with scan order. This does not measure exclusive reclaimable space for compressed, deduplicated, or reflinked files. Unsupported platforms and older snapshots show allocated storage as unavailable, never as an estimated value.
+
+Cancelling a scan discards its partial snapshot and preserves completed snapshots. Once final publication begins, cancellation is no longer accepted. Retention removes the oldest completed snapshots beyond `SNAPSHOT_RETENTION`; the latest Scan Run is retained even if it failed or was cancelled.
+
+### Optional access protection
+
+Set both authentication variables to protect the UI and all API routes, including health checks. Browsers show their native login prompt. Keep credentials outside version control and use HTTPS at your reverse proxy when connecting over an untrusted network. Without these variables, the app remains accessible without authentication. This is a single-account access gate, not a role or user-management system.
 
 <details>
 <summary>Scan profiles and advanced tuning</summary>
@@ -182,7 +207,7 @@ Then open [http://localhost:8081](http://localhost:8081).
 - Scanning uses a regular filesystem walk; there is no NTFS MFT-style acceleration
 - Symlinks are not followed
 - The UI focuses on one configured root path at a time
-- There is no built-in authentication layer
+- Built-in authentication is optional and uses one shared account
 
 <details>
 <summary>API endpoints</summary>
@@ -192,9 +217,17 @@ These are mainly useful for automation or custom integrations.
 - `GET /api/v1/health`
 - `GET /api/v1/config`
 - `POST /api/v1/scans`
+- `GET /api/v1/scans` (retained completed snapshots)
+- `POST /api/v1/scans/{scan_id}/cancel`
+- `GET /api/v1/scans/{scan_id}/diagnostics`
+- `GET /api/v1/scans/{scan_id}/diff?base=<older-scan-id>&path=<absolute-path>&limit=<n>&offset=<n>`
+- `GET /api/v1/scans/{scan_id}/extensions?path=<absolute-path>`
+- `GET /api/v1/scans/{scan_id}/export?path=<absolute-path>&format=<csv|json>&scope=<folder|recursive>`
 - `GET /api/v1/scans/{scan_id}`
 - `GET /api/v1/scans/{scan_id}/explore?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 - `GET /api/v1/scans/{scan_id}/children?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 - `GET /api/v1/scans/{scan_id}/largest?path=<absolute-path>&limit=<n>&q=<substring>&type=<file|dir>&min_size=<bytes>&sort=<size_desc|size_asc|name_asc|name_desc>`
 
 </details>
+
+Folder queries also accept `offset`, `extension` (for example `.pdf`), and `modified_before` (Unix seconds). The same filters apply to recursive search, extension summaries, and exports. Diff queries compare all changes under the requested path.
