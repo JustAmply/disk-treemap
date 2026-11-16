@@ -78,7 +78,8 @@ test('folder pagination sends offsets and filters reset the page', async () => {
 test('snapshot selection updates coverage and comparison uses explicit base', async () => {
   const { el, requests } = await mount();
   assert.equal(el('scanDiagnostics').hidden, false);
-  assert.match(el('diagnosticsTitle').textContent, /1 warnings/);
+  assert.equal(el('diagnosticsTitle').textContent, 'Scan coverage \u00b7 1 warnings \u00b7 1 excluded entries');
+  assert.match(el('snapshotSelect').children[0].textContent, /^#2 \u00b7 /);
   el('snapshotSelect').value = '1'; el('openSnapshotButton').click(); await settle();
   assert.ok(requests.some(r => r.url.pathname === '/api/v1/scans/1/explore'));
   el('compareSelect').value = '2'; el('compareButton').click(); await settle();
@@ -100,4 +101,23 @@ test('active scan exposes cancellation and uses POST', async () => {
   el('cancelScanButton').click(); await settle();
   assert.ok(requests.some(r => r.url.pathname === '/api/v1/scans/3/cancel' && r.options.method === 'POST'));
   assert.match(el('appAlertText').textContent, /Cancellation requested/);
+});
+
+test('selected file distinguishes sparse allocation, unavailable allocation and coverage', async () => {
+  const cases = [
+    { allocated_bytes: 0, hardlink: true, expected: ['1.00 MB logical', '0 B allocated', 'Hardlink (allocation counted once per scan)'] },
+    { allocated_bytes: null, incomplete: true, expected: ['allocation unavailable', 'Incomplete: unreadable contents'] },
+    { allocated_bytes: 0, excluded: true, expected: ['Excluded from scan'] },
+  ];
+  for (const { expected, ...metadata } of cases) {
+    const { el } = await mount({ handler(url) {
+      if (!url.pathname.endsWith('/explore')) return;
+      return { path: '/root', summary: { total_bytes: 1048576, returned_item_count: 1, matching_item_count: 1 },
+        items: [{ path: '/root/sparse.bin', parent_path: '/root', name: 'sparse.bin', type: 'file', size_bytes: 1048576, ...metadata }],
+        treemap: { children: [] }, has_more: false };
+    } });
+    for (const text of expected) assert.ok(el('selectedMeta').textContent.includes(text), el('selectedMeta').textContent);
+    assert.match(el('selectedMeta').textContent, /^File \u2022 /);
+    if (metadata.excluded) assert.equal(el('selectedAction').hidden, true);
+  }
 });

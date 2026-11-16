@@ -909,27 +909,31 @@
     const items = App.formatCount(summary.matching_item_count || 0);
     const dirs = App.formatCount(summary.visible_dir_count || 0);
     const files = App.formatCount(summary.visible_file_count || 0);
-    const base = `${items} matching items â€¢ ${dirs} folders â€¢ ${files} files â€¢ ${sortLabel}`;
+    const base = `${items} matching items • ${dirs} folders • ${files} files • ${sortLabel}`;
 
     if (!summary.is_result_truncated) {
       return base;
     }
 
-    return `${base} â€¢ showing ${App.formatCount(summary.returned_item_count || 0)} rows`;
+    return `${base} • showing ${App.formatCount(summary.returned_item_count || 0)} rows`;
   }
 
   function buildInspectorMeta(summary, path) {
     const shown = App.formatBytes(summary.visible_bytes || 0);
     const total = App.formatBytes(summary.total_bytes || 0);
-    return `Direct contents of ${App.basename(path) || path} â€¢ ${shown} in view of ${total}`;
+    return `Direct contents of ${App.basename(path) || path} • ${shown} in view of ${total}`;
   }
 
   function buildSelectedMeta(item) {
     if (item.synthetic) {
-      return `${App.formatCount(item.hidden_item_count || 0)} grouped items â€¢ ${App.formatBytes(item.size_bytes || 0)}`;
+      return `${App.formatCount(item.hidden_item_count || 0)} grouped items • ${App.formatBytes(item.size_bytes || 0)}`;
     }
     const typeLabel = item.type === "dir" ? "Folder" : "File";
-    return `${typeLabel} â€¢ ${App.formatBytes(item.size_bytes || 0)}`;
+    const allocation = item.allocated_bytes == null ? "allocation unavailable" : `${App.formatBytes(item.allocated_bytes)} allocated`;
+    const coverage = item.excluded ? " • Excluded from scan" : item.incomplete ? " • Incomplete: unreadable contents" : "";
+    const linked = item.hardlink ? " • Hardlink (allocation counted once per scan)" : "";
+    const modified = item.mtime_unix ? ` • Modified ${new Date(item.mtime_unix * 1000).toLocaleString()}` : "";
+    return `${typeLabel} • ${App.formatBytes(item.size_bytes || 0)} logical • ${allocation}${coverage}${linked}${modified}`;
   }
 
   function buildSummaryPathLabel(activePath) {
@@ -1110,7 +1114,7 @@
         select.add(new Option(select === els.compareSelect ? "Choose a snapshot" : "No snapshots yet", ""));
       }
       for (const scan of state.snapshots) {
-        select.add(new Option(`#${scan.id} Â· ${new Date(scan.finished_at).toLocaleString()} Â· ${App.formatBytes(scan.total_bytes)}`, String(scan.id)));
+        select.add(new Option(`#${scan.id} · ${new Date(scan.finished_at).toLocaleString()} · ${App.formatBytes(scan.total_bytes)}`, String(scan.id)));
       }
     }
     els.snapshotSelect.value = String(state.viewedScanId || state.snapshots[0]?.id || "");
@@ -1129,7 +1133,7 @@
       const warnings = data.warnings || [];
       const patterns = data.exclude_patterns || [];
       els.scanDiagnostics.hidden = warnings.length === 0 && patterns.length === 0;
-      els.diagnosticsTitle.textContent = `Scan coverage Â· ${warnings.length} warnings Â· ${data.excluded_count || 0} excluded entries`;
+      els.diagnosticsTitle.textContent = `Scan coverage · ${warnings.length} warnings · ${data.excluded_count || 0} excluded entries`;
       els.exclusionSummary.textContent = patterns.length ? `Excluded patterns: ${patterns.join(", ")}. Excluded folders were not traversed.` : "No exclusion patterns. Unreadable contents are not included in size totals.";
       els.warningList.replaceChildren();
       for (const warning of warnings) appendAnalysisRow(els.warningList, warning.path, `${warning.operation}: ${warning.message}`);
@@ -1172,7 +1176,7 @@
     const offset = more ? state.analysis.offset : 0;
     if (!more) els.analysisResults.replaceChildren();
     els.analysisMoreButton.hidden = true;
-    els.analysisStatus.textContent = "Loading analysisâ€¦";
+    els.analysisStatus.textContent = "Loading analysis…";
     const path = kind === "largest" ? state.config.analyze_root : state.currentPath;
     const query = viewQuery(path);
     query.set("limit", "100");
@@ -1189,11 +1193,11 @@
         App.renderItemList(list, items, { activePath: "", onFocus: selectItem, onNavigate: navigateToPath });
         els.analysisResults.append(list);
       } else if (kind === "extensions") {
-        for (const item of items) appendAnalysisRow(els.analysisResults, item.extension || "No extension", `${App.formatCount(item.count)} files Â· ${App.formatBytes(item.total_bytes)}`);
+        for (const item of items) appendAnalysisRow(els.analysisResults, item.extension || "No extension", `${App.formatCount(item.count)} files · ${App.formatBytes(item.total_bytes)}`);
       } else {
         for (const item of items) {
-          const delta = `${item.delta_bytes < 0 ? "âˆ’" : "+"}${App.formatBytes(Math.abs(item.delta_bytes))}`;
-          appendAnalysisRow(els.analysisResults, item.path, `${item.change} Â· ${App.formatBytes(item.before_bytes)} â†’ ${App.formatBytes(item.after_bytes)} (${delta})`);
+          const delta = `${item.delta_bytes < 0 ? "−" : "+"}${App.formatBytes(Math.abs(item.delta_bytes))}`;
+          appendAnalysisRow(els.analysisResults, item.path, `${item.change} · ${App.formatBytes(item.before_bytes)} → ${App.formatBytes(item.after_bytes)} (${delta})`);
         }
       }
       const count = offset + items.length;
@@ -1211,7 +1215,7 @@
     const query = viewQuery(state.currentPath);
     query.set("format", format);
     query.set("scope", els.exportScope.value);
-    els.analysisStatus.textContent = "Preparing exportâ€¦";
+    els.analysisStatus.textContent = "Preparing export…";
     try {
       const response = await fetch(`/api/v1/scans/${state.viewedScanId}/export?${query}`);
       if (!response.ok) throw new Error((await response.json()).error || "Export request failed");
