@@ -293,7 +293,7 @@ func TestConfigIncludesCurrentAndLatestCompletedScan(t *testing.T) {
 	}
 }
 
-func TestScansCollectionRejectsGet(t *testing.T) {
+func TestScansCollectionListsSnapshots(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
@@ -309,8 +309,8 @@ func TestScansCollectionRejectsGet(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -472,7 +472,7 @@ func TestDeleteScanEndpointRemoved(t *testing.T) {
 	}
 }
 
-func TestDiffEndpointRemoved(t *testing.T) {
+func TestDiffRequiresBaseSnapshot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dataDir := t.TempDir()
@@ -492,8 +492,8 @@ func TestDiffEndpointRemoved(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

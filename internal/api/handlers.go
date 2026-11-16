@@ -65,6 +65,8 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		"snapshot_retention":        h.cfg.SnapshotRetention,
+		"scan_exclusions":           h.cfg.ScanExclusions,
 		"analyze_root":              h.cfg.AnalyzeRoot,
 		"listen_addr":               h.cfg.ListenAddr,
 		"data_dir":                  h.cfg.DataDir,
@@ -78,6 +80,16 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleScans(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		scans, err := h.svc.ListSnapshots(r.Context())
+		if err != nil {
+			h.handleDomainError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -128,6 +140,30 @@ func (h *Handler) handleScanRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch parts[1] {
+	case "diagnostics":
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		details, err := h.svc.GetScanDiagnostics(r.Context(), scanID)
+		if err != nil {
+			h.handleDomainError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, details)
+	case "cancel":
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if err := h.svc.CancelScan(scanID); err != nil {
+			h.handleDomainError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+	case "diff", "extensions", "export":
+		h.handleAnalysis(w, r, scanID, parts[1])
+
 	case "children":
 		h.handleGetChildren(w, r, scanID)
 	case "explore":
@@ -231,13 +267,24 @@ func parseFolderViewRequest(r *http.Request) (app.FolderViewRequest, error) {
 		return app.FolderViewRequest{}, err
 	}
 
+	offset, err := parseIntQuery(r, "offset", 0)
+	if err != nil {
+		return app.FolderViewRequest{}, err
+	}
+	modifiedBefore, err := parseInt64Query(r, "modified_before", 0)
+	if err != nil {
+		return app.FolderViewRequest{}, err
+	}
 	return app.FolderViewRequest{
-		Path:    r.URL.Query().Get("path"),
-		Limit:   limit,
-		Query:   r.URL.Query().Get("q"),
-		Kind:    r.URL.Query().Get("type"),
-		MinSize: minSize,
-		Sort:    r.URL.Query().Get("sort"),
+		Offset:         offset,
+		Extension:      r.URL.Query().Get("extension"),
+		ModifiedBefore: modifiedBefore,
+		Path:           r.URL.Query().Get("path"),
+		Limit:          limit,
+		Query:          r.URL.Query().Get("q"),
+		Kind:           r.URL.Query().Get("type"),
+		MinSize:        minSize,
+		Sort:           r.URL.Query().Get("sort"),
 	}, nil
 }
 
@@ -247,7 +294,7 @@ func (h *Handler) handleDomainError(w http.ResponseWriter, err error) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, app.ErrInvalidInput):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
-	case errors.Is(err, app.ErrScanRunning):
+	case errors.Is(err, app.ErrScanRunning), errors.Is(err, app.ErrScanNotActive):
 		writeJSONError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		writeJSONError(w, http.StatusNotFound, "not found")

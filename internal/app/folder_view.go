@@ -19,12 +19,15 @@ const (
 )
 
 type FolderViewRequest struct {
-	Path    string
-	Limit   int
-	Query   string
-	Kind    string
-	MinSize int64
-	Sort    string
+	Offset         int
+	Extension      string
+	ModifiedBefore int64
+	Path           string
+	Limit          int
+	Query          string
+	Kind           string
+	MinSize        int64
+	Sort           string
 }
 
 type ChildrenResponse struct {
@@ -35,12 +38,19 @@ type ChildrenResponse struct {
 }
 
 type LargestResponse struct {
-	ScanID int64        `json:"scan_id"`
-	Path   string       `json:"path"`
-	Items  []store.Node `json:"items"`
+	HasMore    bool         `json:"has_more"`
+	NextOffset int          `json:"next_offset"`
+	ScanID     int64        `json:"scan_id"`
+	Path       string       `json:"path"`
+	Items      []store.Node `json:"items"`
 }
 
 type FolderViewSummary struct {
+	AllocatedBytes *int64 `json:"allocated_bytes"`
+	Incomplete     bool   `json:"incomplete"`
+	Excluded       bool   `json:"excluded"`
+	Hardlink       bool   `json:"hardlink"`
+
 	Name              string `json:"name"`
 	TotalBytes        int64  `json:"total_bytes"`
 	VisibleBytes      int64  `json:"visible_bytes"`
@@ -54,6 +64,11 @@ type FolderViewSummary struct {
 }
 
 type FolderViewTreemapNode struct {
+	AllocatedBytes *int64 `json:"allocated_bytes"`
+	Incomplete     bool   `json:"incomplete"`
+	Excluded       bool   `json:"excluded"`
+	Hardlink       bool   `json:"hardlink"`
+
 	Name            string                  `json:"name"`
 	Path            string                  `json:"path,omitempty"`
 	Type            string                  `json:"type"`
@@ -65,11 +80,13 @@ type FolderViewTreemapNode struct {
 }
 
 type FolderViewResponse struct {
-	ScanID  int64                 `json:"scan_id"`
-	Path    string                `json:"path"`
-	Summary FolderViewSummary     `json:"summary"`
-	Items   []store.Node          `json:"items"`
-	Treemap FolderViewTreemapNode `json:"treemap"`
+	HasMore    bool                  `json:"has_more"`
+	NextOffset int                   `json:"next_offset"`
+	ScanID     int64                 `json:"scan_id"`
+	Path       string                `json:"path"`
+	Summary    FolderViewSummary     `json:"summary"`
+	Items      []store.Node          `json:"items"`
+	Treemap    FolderViewTreemapNode `json:"treemap"`
 }
 
 type folderView struct {
@@ -118,15 +135,23 @@ func (v *folderView) largest(ctx context.Context, scanID int64, request FolderVi
 		return LargestResponse{}, err
 	}
 
-	items, err := v.store.ListLargestInPathWithOptions(ctx, scanID, normalized.Path, normalized.storeOptions())
+	options := normalized.storeOptions()
+	options.Limit++
+	items, err := v.store.ListLargestInPathWithOptions(ctx, scanID, normalized.Path, options)
 	if err != nil {
 		return LargestResponse{}, err
 	}
 
+	hasMore := len(items) > normalized.Limit
+	if hasMore {
+		items = items[:normalized.Limit]
+	}
 	return LargestResponse{
-		ScanID: scanID,
-		Path:   normalized.Path,
-		Items:  items,
+		HasMore:    hasMore,
+		NextOffset: normalized.Offset + len(items),
+		ScanID:     scanID,
+		Path:       normalized.Path,
+		Items:      items,
 	}, nil
 }
 
@@ -156,11 +181,13 @@ func (v *folderView) read(ctx context.Context, scanID int64, request FolderViewR
 	}
 
 	return FolderViewResponse{
-		ScanID:  scanID,
-		Path:    normalized.Path,
-		Summary: summary,
-		Items:   items,
-		Treemap: treemap,
+		HasMore:    int64(normalized.Offset+len(items)) < aggregate.Count,
+		NextOffset: normalized.Offset + len(items),
+		ScanID:     scanID,
+		Path:       normalized.Path,
+		Summary:    summary,
+		Items:      items,
+		Treemap:    treemap,
 	}, nil
 }
 
@@ -170,6 +197,13 @@ func (v *folderView) normalize(request FolderViewRequest, maxLimit, defaultLimit
 		return FolderViewRequest{}, err
 	}
 	request.Path = path
+	request.Extension = strings.ToLower(strings.TrimSpace(request.Extension))
+	if request.Extension != "" && (!strings.HasPrefix(request.Extension, ".") || strings.ContainsAny(request.Extension, `/\`)) {
+		return FolderViewRequest{}, fmt.Errorf("%w: extension must start with a dot and contain no path separators", ErrInvalidInput)
+	}
+	if request.Offset < 0 || request.ModifiedBefore < 0 {
+		return FolderViewRequest{}, fmt.Errorf("%w: offset and modified_before must be nonnegative", ErrInvalidInput)
+	}
 	request.Query = strings.TrimSpace(request.Query)
 	request.Kind = strings.TrimSpace(request.Kind)
 	request.Sort = strings.TrimSpace(request.Sort)
@@ -203,29 +237,37 @@ func (v *folderView) normalize(request FolderViewRequest, maxLimit, defaultLimit
 
 func (request FolderViewRequest) storeOptions() store.NodeQueryOptions {
 	return store.NodeQueryOptions{
-		Limit:   request.Limit,
-		Query:   request.Query,
-		Kind:    request.Kind,
-		MinSize: request.MinSize,
-		Sort:    request.Sort,
+		Limit:          request.Limit,
+		Offset:         request.Offset,
+		Extension:      request.Extension,
+		ModifiedBefore: request.ModifiedBefore,
+		Query:          request.Query,
+		Kind:           request.Kind,
+		MinSize:        request.MinSize,
+		Sort:           request.Sort,
 	}
 }
 
 func (request FolderViewRequest) storeOptionsWithoutLimit() store.NodeQueryOptions {
 	options := request.storeOptions()
 	options.Limit = 0
+	options.Offset = 0
 	return options
 }
 
 func summarizeFolderView(current store.Node, items []store.Node, aggregate store.ChildAggregate, request FolderViewRequest) FolderViewSummary {
 	summary := FolderViewSummary{
+		AllocatedBytes:    current.AllocatedBytes,
+		Incomplete:        current.Incomplete,
+		Excluded:          current.Excluded,
+		Hardlink:          current.Hardlink,
 		Name:              current.Name,
 		TotalBytes:        current.SizeBytes,
 		VisibleBytes:      aggregate.TotalBytes,
 		MatchingItemCount: aggregate.Count,
 		ReturnedItemCount: len(items),
 		HiddenItemCount:   maxInt64(aggregate.Count-int64(len(items)), 0),
-		HasActiveFilters:  request.Query != "" || request.Kind != "" || request.MinSize > 0,
+		HasActiveFilters:  request.Query != "" || request.Kind != "" || request.MinSize > 0 || request.Extension != "" || request.ModifiedBefore > 0,
 	}
 	summary.IsResultTruncated = summary.HiddenItemCount > 0
 	for _, item := range items {
@@ -340,11 +382,15 @@ func (v *folderView) buildTreemap(
 
 func toFolderViewTreemapNode(node store.Node) FolderViewTreemapNode {
 	return FolderViewTreemapNode{
-		Name:      node.Name,
-		Path:      node.Path,
-		Type:      node.Kind,
-		SizeBytes: node.SizeBytes,
-		Clickable: node.Kind == "dir",
+		AllocatedBytes: node.AllocatedBytes,
+		Incomplete:     node.Incomplete,
+		Excluded:       node.Excluded,
+		Hardlink:       node.Hardlink,
+		Name:           node.Name,
+		Path:           node.Path,
+		Type:           node.Kind,
+		SizeBytes:      node.SizeBytes,
+		Clickable:      node.Kind == "dir",
 	}
 }
 
