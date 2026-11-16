@@ -6,9 +6,11 @@ import (
 	"net/http"
 )
 
-// RequireAuth protects both the UI and API when credentials are configured.
+// RequireAuth rejects cross-origin browser mutations and protects the UI and API
+// when credentials are configured.
 // Deploy behind HTTPS when clients connect over an untrusted network.
 func RequireAuth(next http.Handler, username, password string) http.Handler {
+	next = http.NewCrossOriginProtection().Handler(next)
 	if username == "" && password == "" {
 		return next
 	}
