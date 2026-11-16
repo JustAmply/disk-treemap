@@ -14,7 +14,7 @@ import (
 
 const (
 	sqliteMaxBindParameters = 32766
-	nodeInsertColumnCount   = 7
+	nodeInsertColumnCount   = 11
 	maxNodeRowsPerInsert    = sqliteMaxBindParameters / nodeInsertColumnCount
 	nodeWriterStageTable    = "node_writer_stage"
 
@@ -23,7 +23,8 @@ const (
 )
 
 type Store struct {
-	db *sql.DB
+	db                *sql.DB
+	snapshotRetention int
 }
 
 type ScanStatus string
@@ -33,6 +34,7 @@ const (
 	ScanRunning   ScanStatus = "running"
 	ScanCompleted ScanStatus = "completed"
 	ScanFailed    ScanStatus = "failed"
+	ScanCancelled ScanStatus = "cancelled"
 )
 
 type ScanRun struct {
@@ -67,20 +69,27 @@ type ScanOutcome struct {
 }
 
 type Node struct {
-	Path       string `json:"path"`
-	ParentPath string `json:"parent_path"`
-	Name       string `json:"name"`
-	Kind       string `json:"type"`
-	SizeBytes  int64  `json:"size_bytes"`
-	MtimeUnix  int64  `json:"mtime_unix"`
+	Path           string `json:"path"`
+	ParentPath     string `json:"parent_path"`
+	Name           string `json:"name"`
+	Kind           string `json:"type"`
+	SizeBytes      int64  `json:"size_bytes"`
+	MtimeUnix      int64  `json:"mtime_unix"`
+	AllocatedBytes *int64 `json:"allocated_bytes"`
+	Incomplete     bool   `json:"incomplete"`
+	Excluded       bool   `json:"excluded"`
+	Hardlink       bool   `json:"hardlink"`
 }
 
 type NodeQueryOptions struct {
-	Limit   int
-	Query   string
-	Kind    string
-	MinSize int64
-	Sort    string
+	Offset         int
+	Extension      string
+	ModifiedBefore int64
+	Limit          int
+	Query          string
+	Kind           string
+	MinSize        int64
+	Sort           string
 }
 
 type ChildAggregate struct {
@@ -98,12 +107,16 @@ type SnapshotWriter struct {
 }
 
 type compactNodeRow struct {
-	NodeID    int64
-	ParentID  sql.NullInt64
-	Name      string
-	KindCode  int
-	SizeBytes int64
-	MtimeUnix int64
+	NodeID         int64
+	ParentID       sql.NullInt64
+	Name           string
+	KindCode       int
+	SizeBytes      int64
+	MtimeUnix      int64
+	AllocatedBytes *int64
+	Incomplete     bool
+	Excluded       bool
+	Hardlink       bool
 }
 
 func Open(dbPath string) (*Store, error) {
@@ -170,6 +183,10 @@ func (s *Store) Init(ctx context.Context) error {
 			kind INTEGER NOT NULL CHECK(kind IN (1,2)),
 			size_bytes INTEGER NOT NULL,
 			mtime_unix INTEGER NOT NULL,
+			allocated_bytes INTEGER,
+			incomplete INTEGER NOT NULL DEFAULT 0,
+			excluded INTEGER NOT NULL DEFAULT 0,
+			hardlink INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (scan_id, node_id),
 			FOREIGN KEY (scan_id) REFERENCES scan_runs(id) ON DELETE CASCADE,
 			FOREIGN KEY (scan_id, parent_id) REFERENCES nodes(scan_id, node_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
@@ -183,6 +200,12 @@ func (s *Store) Init(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("init compact node schema: %w", err)
 		}
+	}
+	if err := s.initNodeMetadata(ctx); err != nil {
+		return err
+	}
+	if err := s.initScanDiagnostics(ctx); err != nil {
+		return err
 	}
 	if err := s.discardLegacyRuns(ctx); err != nil {
 		return err
@@ -270,20 +293,20 @@ func (s *Store) StartRun(ctx context.Context, scanID int64, startedAt time.Time)
 }
 
 func (s *Store) FinishRun(ctx context.Context, scanID int64, outcome ScanOutcome) error {
-	if outcome.Status != ScanCompleted && outcome.Status != ScanFailed {
+	if outcome.Status != ScanCompleted && outcome.Status != ScanFailed && outcome.Status != ScanCancelled {
 		return fmt.Errorf("finish scan: invalid terminal status %q", outcome.Status)
 	}
 	allowedStatus := ScanRunning
 	expectedStatus := string(ScanRunning)
-	if outcome.Status == ScanFailed {
+	if outcome.Status != ScanCompleted {
 		allowedStatus = ScanQueued
 		expectedStatus = "queued or running"
 	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE scan_runs
 		SET status=?, finished_at=?, total_bytes=?, total_nodes=?, warning_count=?, error=?
-		WHERE id=? AND (status=? OR (?=? AND status=?))
-	`, outcome.Status, outcome.FinishedAt.UTC().Format(time.RFC3339Nano), outcome.TotalBytes, outcome.TotalNodes, outcome.WarningCount, outcome.Error, scanID, allowedStatus, outcome.Status, ScanFailed, ScanRunning)
+		WHERE id=? AND (status=? OR (?<>? AND status=?))
+	`, outcome.Status, outcome.FinishedAt.UTC().Format(time.RFC3339Nano), outcome.TotalBytes, outcome.TotalNodes, outcome.WarningCount, outcome.Error, scanID, allowedStatus, outcome.Status, ScanCompleted, ScanRunning)
 	if err != nil {
 		return fmt.Errorf("complete scan: %w", err)
 	}
@@ -364,7 +387,11 @@ func (s *Store) BeginSnapshot(ctx context.Context, scanID int64) (*SnapshotWrite
 			name TEXT NOT NULL,
 			kind INTEGER NOT NULL,
 			size_bytes INTEGER NOT NULL,
-			mtime_unix INTEGER NOT NULL
+			mtime_unix INTEGER NOT NULL,
+			allocated_bytes INTEGER,
+			incomplete INTEGER NOT NULL DEFAULT 0,
+			excluded INTEGER NOT NULL DEFAULT 0,
+			hardlink INTEGER NOT NULL DEFAULT 0
 		)
 	`); err != nil {
 		_ = tx.Rollback()
@@ -407,12 +434,16 @@ func (w *SnapshotWriter) Write(ctx context.Context, nodes []Node) error {
 			return err
 		}
 		stored = append(stored, compactNodeRow{
-			NodeID:    nodeID,
-			ParentID:  parentID,
-			Name:      node.Name,
-			KindCode:  kindCode,
-			SizeBytes: node.SizeBytes,
-			MtimeUnix: node.MtimeUnix,
+			NodeID:         nodeID,
+			ParentID:       parentID,
+			Name:           node.Name,
+			KindCode:       kindCode,
+			SizeBytes:      node.SizeBytes,
+			MtimeUnix:      node.MtimeUnix,
+			AllocatedBytes: node.AllocatedBytes,
+			Incomplete:     node.Incomplete,
+			Excluded:       node.Excluded,
+			Hardlink:       node.Hardlink,
 		})
 	}
 
@@ -451,15 +482,15 @@ func (w *SnapshotWriter) writeCompactChunk(ctx context.Context, nodes []compactN
 	var query strings.Builder
 	query.WriteString(`INSERT INTO `)
 	query.WriteString(nodeWriterStageTable)
-	query.WriteString(`(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix) VALUES `)
+	query.WriteString(`(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink) VALUES `)
 
 	args := make([]any, 0, len(nodes)*nodeInsertColumnCount)
 	for i, node := range nodes {
 		if i > 0 {
 			query.WriteString(",")
 		}
-		query.WriteString("(?, ?, ?, ?, ?, ?, ?)")
-		args = append(args, w.scanID, node.NodeID, nullableNullInt64(node.ParentID), node.Name, node.KindCode, node.SizeBytes, node.MtimeUnix)
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, w.scanID, node.NodeID, nullableNullInt64(node.ParentID), node.Name, node.KindCode, node.SizeBytes, node.MtimeUnix, node.AllocatedBytes, node.Incomplete, node.Excluded, node.Hardlink)
 	}
 
 	if _, err := w.tx.ExecContext(ctx, query.String(), args...); err != nil {
@@ -480,8 +511,8 @@ func (w *SnapshotWriter) Publish() error {
 		}
 	}
 	if _, err := w.tx.Exec(`
-		INSERT INTO nodes(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix)
-		SELECT scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix
+		INSERT INTO nodes(scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink)
+		SELECT scan_id, node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink
 		FROM ` + nodeWriterStageTable + `
 		ORDER BY scan_id, node_id
 	`); err != nil {
@@ -571,17 +602,26 @@ func (s *Store) PruneOperationalScans(ctx context.Context) ([]int64, error) {
 		return nil, fmt.Errorf("get latest scan id: %w", err)
 	}
 
-	var latestCompletedID sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT id FROM scan_runs WHERE status='completed' ORDER BY id DESC LIMIT 1`).Scan(&latestCompletedID); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("get latest completed scan id: %w", err)
-	}
-
 	keepIDs := map[int64]struct{}{}
 	if latestID.Valid {
 		keepIDs[latestID.Int64] = struct{}{}
 	}
-	if latestCompletedID.Valid {
-		keepIDs[latestCompletedID.Int64] = struct{}{}
+	retained, err := s.db.QueryContext(ctx, `SELECT id FROM scan_runs WHERE status='completed' ORDER BY id DESC LIMIT ?`, max(1, s.snapshotRetention))
+	if err != nil {
+		return nil, err
+	}
+	for retained.Next() {
+		var id int64
+		if err := retained.Scan(&id); err != nil {
+			retained.Close()
+			return nil, err
+		}
+		keepIDs[id] = struct{}{}
+	}
+	err = retained.Err()
+	retained.Close()
+	if err != nil {
+		return nil, err
 	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM scan_runs ORDER BY id DESC`)
@@ -711,7 +751,7 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 	sortClause := normalizeSort(opts.Sort)
 	query := strings.Builder{}
 	query.WriteString(`
-		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix
+		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink
 		FROM nodes
 		WHERE scan_id=? AND parent_id=?
 	`)
@@ -721,8 +761,8 @@ func (s *Store) ListChildrenWithOptions(ctx context.Context, scanID int64, paren
 
 	query.WriteString(" ORDER BY ")
 	query.WriteString(sortClause)
-	query.WriteString(" LIMIT ?")
-	args = append(args, opts.Limit)
+	query.WriteString(" LIMIT ? OFFSET ?")
+	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
@@ -767,16 +807,16 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 	sortClause := normalizeSort(opts.Sort)
 	query := strings.Builder{}
 	query.WriteString(`
-		WITH RECURSIVE descendants(node_id, parent_id, name, kind, size_bytes, mtime_unix, rel_path) AS (
-			SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, ? || name
+		WITH RECURSIVE descendants(node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink, rel_path) AS (
+			SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink, ? || name
 			FROM nodes
 			WHERE scan_id=? AND parent_id=?
 			UNION ALL
-			SELECT n.node_id, n.parent_id, n.name, n.kind, n.size_bytes, n.mtime_unix, d.rel_path || ? || n.name
+			SELECT n.node_id, n.parent_id, n.name, n.kind, n.size_bytes, n.mtime_unix, n.allocated_bytes, n.incomplete, n.excluded, n.hardlink, d.rel_path || ? || n.name
 			FROM nodes n
 			JOIN descendants d ON n.scan_id=? AND n.parent_id=d.node_id
 		)
-		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, rel_path
+		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink, rel_path
 		FROM descendants
 		WHERE 1=1
 	`)
@@ -787,8 +827,8 @@ func (s *Store) ListLargestInPathWithOptions(ctx context.Context, scanID int64, 
 
 	query.WriteString(" ORDER BY ")
 	query.WriteString(sortClause)
-	query.WriteString(" LIMIT ?")
-	args = append(args, opts.Limit)
+	query.WriteString(" LIMIT ? OFFSET ?")
+	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
@@ -885,9 +925,9 @@ func (s *Store) rootNodeID(ctx context.Context, scanID int64) (int64, error) {
 func (s *Store) getCompactNodeRow(ctx context.Context, scanID, nodeID int64) (compactNodeRow, error) {
 	var row compactNodeRow
 	err := s.db.QueryRowContext(ctx, `
-		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix
+		SELECT node_id, parent_id, name, kind, size_bytes, mtime_unix, allocated_bytes, incomplete, excluded, hardlink
 		FROM nodes WHERE scan_id=? AND node_id=?
-	`, scanID, nodeID).Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix)
+	`, scanID, nodeID).Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix, &row.AllocatedBytes, &row.Incomplete, &row.Excluded, &row.Hardlink)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return compactNodeRow{}, ErrNotFound
@@ -899,25 +939,29 @@ func (s *Store) getCompactNodeRow(ctx context.Context, scanID, nodeID int64) (co
 
 func scanCompactNodeRow(rows *sql.Rows) (compactNodeRow, error) {
 	var row compactNodeRow
-	err := rows.Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix)
+	err := rows.Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix, &row.AllocatedBytes, &row.Incomplete, &row.Excluded, &row.Hardlink)
 	return row, err
 }
 
 func scanCompactNodeRowWithRelPath(rows *sql.Rows) (compactNodeRow, string, error) {
 	var row compactNodeRow
 	var relPath string
-	err := rows.Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix, &relPath)
+	err := rows.Scan(&row.NodeID, &row.ParentID, &row.Name, &row.KindCode, &row.SizeBytes, &row.MtimeUnix, &row.AllocatedBytes, &row.Incomplete, &row.Excluded, &row.Hardlink, &relPath)
 	return row, relPath, err
 }
 
 func compactRowToNode(path, parentPath string, row compactNodeRow) Node {
 	return Node{
-		Path:       filepath.Clean(path),
-		ParentPath: parentPath,
-		Name:       row.Name,
-		Kind:       compactKindName(row.KindCode),
-		SizeBytes:  row.SizeBytes,
-		MtimeUnix:  row.MtimeUnix,
+		Path:           filepath.Clean(path),
+		ParentPath:     parentPath,
+		Name:           row.Name,
+		Kind:           compactKindName(row.KindCode),
+		SizeBytes:      row.SizeBytes,
+		MtimeUnix:      row.MtimeUnix,
+		AllocatedBytes: row.AllocatedBytes,
+		Incomplete:     row.Incomplete,
+		Excluded:       row.Excluded,
+		Hardlink:       row.Hardlink,
 	}
 }
 
@@ -973,6 +1017,15 @@ func compactKindName(kindCode int) string {
 }
 
 func appendCompactNodeFilters(query *strings.Builder, args *[]any, opts NodeQueryOptions) {
+	if opts.Extension != "" {
+		query.WriteString(" AND kind=1 AND lower(substr(name, -length(?)))=?")
+		*args = append(*args, opts.Extension, opts.Extension)
+	}
+	if opts.ModifiedBefore > 0 {
+		query.WriteString(" AND mtime_unix<?")
+		*args = append(*args, opts.ModifiedBefore)
+	}
+
 	if opts.Kind == "file" || opts.Kind == "dir" {
 		kindCode, _ := compactKindCode(opts.Kind)
 		query.WriteString(" AND kind=?")
@@ -991,15 +1044,15 @@ func appendCompactNodeFilters(query *strings.Builder, args *[]any, opts NodeQuer
 func normalizeSort(sort string) string {
 	switch sort {
 	case "size_asc":
-		return "size_bytes ASC, name ASC"
+		return "size_bytes ASC, name ASC, node_id ASC"
 	case "name_asc":
-		return "name ASC"
+		return "name ASC, node_id ASC"
 	case "name_desc":
-		return "name DESC"
+		return "name DESC, node_id ASC"
 	case "size_desc", "":
-		return "size_bytes DESC, name ASC"
+		return "size_bytes DESC, name ASC, node_id ASC"
 	default:
-		return "size_bytes DESC, name ASC"
+		return "size_bytes DESC, name ASC, node_id ASC"
 	}
 }
 

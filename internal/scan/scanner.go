@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"iter"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,18 +13,25 @@ import (
 )
 
 type NodeRecord struct {
-	Path       string
-	ParentPath string
-	Name       string
-	Kind       string
-	SizeBytes  int64
-	MtimeUnix  int64
+	Path           string
+	ParentPath     string
+	Name           string
+	Kind           string
+	SizeBytes      int64
+	MtimeUnix      int64
+	AllocatedBytes *int64
+	Incomplete     bool
+	Excluded       bool
+	Hardlink       bool
 }
 
 type Result struct {
-	TotalBytes   int64
-	TotalNodes   int64
-	WarningCount int64
+	TotalBytes      int64
+	TotalNodes      int64
+	WarningCount    int64
+	Warnings        []Warning
+	ExcludedCount   int64
+	ExcludePatterns []string
 }
 
 type NodeCallback func(NodeRecord) error
@@ -38,6 +44,7 @@ type Scanner struct {
 	root        string
 	fileLimiter *concurrencyLimiter
 	dirLimiter  *concurrencyLimiter
+	exclusions  []string
 }
 
 func New(root string, maxConcurrency int) *Scanner {
@@ -176,16 +183,17 @@ func (s *Scanner) Scan(ctx context.Context, cb NodeCallback) (Result, error) {
 		return Result{}, errors.New("node callback is required")
 	}
 
-	totalBytes, totalNodes, warnings, err := s.scanNode(ctx, s.root, "", nil, nil, s.dirLimiter, s.fileLimiter, cb)
-	if err != nil {
-		return Result{}, err
-	}
-
+	state := newScanState(s.root)
+	emit := state.wrap(cb)
+	totalBytes, totalNodes, _, err := s.scanNode(ctx, s.root, "", nil, nil, s.dirLimiter, s.fileLimiter, emit, state)
 	return Result{
-		TotalBytes:   totalBytes,
-		TotalNodes:   totalNodes,
-		WarningCount: warnings,
-	}, nil
+		TotalBytes:      totalBytes,
+		TotalNodes:      totalNodes,
+		WarningCount:    int64(len(state.warnings)),
+		Warnings:        state.warnings,
+		ExcludedCount:   state.excluded,
+		ExcludePatterns: append([]string(nil), s.exclusions...),
+	}, err
 }
 
 // ScanSeq provides a modern Go 1.23+ push iterator yielding NodeRecords.
@@ -240,6 +248,7 @@ func (s *Scanner) scanNode(
 	dirLimiter *concurrencyLimiter,
 	fileLimiter *concurrencyLimiter,
 	emit NodeCallback,
+	state *scanState,
 ) (int64, int64, int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, 0, 0, err
@@ -259,7 +268,7 @@ func (s *Scanner) scanNode(
 	}
 	if err != nil {
 		if isNonFatal(err) {
-			log.Printf("scan warning: lstat %q: %v", path, err)
+			state.warn(path, "stat", err)
 			return 0, 0, 1, nil
 		}
 		return 0, 0, 0, fmt.Errorf("lstat %q: %w", path, err)
@@ -279,6 +288,7 @@ func (s *Scanner) scanNode(
 	if !info.IsDir() {
 		node.Kind = "file"
 		node.SizeBytes = info.Size()
+		node.AllocatedBytes, node.Hardlink = state.allocation(info)
 		if err := emit(node); err != nil {
 			return 0, 0, 0, err
 		}
@@ -288,7 +298,7 @@ func (s *Scanner) scanNode(
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		if isNonFatal(err) {
-			log.Printf("scan warning: read dir %q: %v", path, err)
+			state.warn(path, "read_directory", err)
 			node.Kind = "dir"
 			node.SizeBytes = 0
 			if emitErr := emit(node); emitErr != nil {
@@ -323,6 +333,18 @@ func (s *Scanner) scanNode(
 	for _, entry := range entries {
 		childPath := filepath.Join(path, entry.Name())
 		childEntry := entry
+		if s.isExcluded(childPath) {
+			kind := "file"
+			if childEntry.IsDir() {
+				kind = "dir"
+			}
+			if err := emit(NodeRecord{Path: childPath, ParentPath: path, Name: childEntry.Name(), Kind: kind, Excluded: true}); err != nil {
+				apply(0, 0, 0, err)
+			} else {
+				apply(0, 1, 0, nil)
+			}
+			continue
+		}
 
 		if childEntry.Type()&os.ModeSymlink != 0 {
 			continue
@@ -342,7 +364,7 @@ func (s *Scanner) scanNode(
 				info, infoErr := e.Info()
 				if infoErr != nil {
 					if isNonFatal(infoErr) {
-						log.Printf("scan warning: lstat %q: %v", p, infoErr)
+						state.warn(p, "stat", infoErr)
 						apply(0, 0, 1, nil)
 						return
 					}
@@ -355,12 +377,12 @@ func (s *Scanner) scanNode(
 				}
 
 				if info.IsDir() {
-					sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit)
+					sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit, state)
 					apply(sz, n, w, childErr)
 					return
 				}
 
-				sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit)
+				sz, n, w, childErr := s.scanNode(ctx, p, path, e, info, dirLimiter, fileLimiter, emit, state)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
@@ -378,13 +400,13 @@ func (s *Scanner) scanNode(
 			go func(p string, e fs.DirEntry) {
 				defer wg.Done()
 				defer dirLimiter.Release()
-				sz, n, w, childErr := s.scanNode(ctx, p, path, e, nil, dirLimiter, fileLimiter, emit)
+				sz, n, w, childErr := s.scanNode(ctx, p, path, e, nil, dirLimiter, fileLimiter, emit, state)
 				apply(sz, n, w, childErr)
 			}(childPath, childEntry)
 			continue
 		}
 
-		sz, n, w, childErr := s.scanNode(ctx, childPath, path, childEntry, nil, dirLimiter, fileLimiter, emit)
+		sz, n, w, childErr := s.scanNode(ctx, childPath, path, childEntry, nil, dirLimiter, fileLimiter, emit, state)
 		apply(sz, n, w, childErr)
 	}
 
