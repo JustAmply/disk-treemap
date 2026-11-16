@@ -27,6 +27,7 @@
       <div class="header-actions">
         <span id="scanState" class="status-chip" data-state="idle">Idle</span>
         <button id="scanButton" class="scan-button" type="button">Run Scan</button>
+        <button id="cancelScanButton" class="ghost-button" type="button" hidden>Cancel scan</button>
       </div>
     </header>
 
@@ -53,6 +54,10 @@
             <span id="summaryShown" class="summary-value">-</span>
           </div>
           <div class="stat-pill">
+            <span class="summary-label" title="File data blocks; hardlinks count once per scan. Subfolder attribution can vary.">Allocated file data</span>
+            <span id="summaryAllocated" class="summary-value">Unavailable</span>
+          </div>
+          <div class="stat-pill">
             <span class="summary-label">Items</span>
             <span id="summaryItems" class="summary-value">-</span>
           </div>
@@ -63,7 +68,11 @@
         </div>
       </div>
 
-      <div class="toolbar-row">
+      <div class="snapshot-toolbar">
+        <label class="field" for="snapshotSelect"><span class="field-label">Snapshot</span><select id="snapshotSelect"><option value="">No snapshots yet</option></select></label>
+        <button id="openSnapshotButton" class="ghost-button" type="button">Open snapshot</button>
+      </div>
+      <search class="toolbar-row" aria-label="Filter folder contents">
         <div class="toolbar-grid toolbar-grid--explore">
           <label class="field">
             <span class="field-label">Search</span>
@@ -88,10 +97,36 @@
             <span class="field-label">Sort</span>
             <select id="sortSelect"></select>
           </label>
+          <label class="field" for="extensionInput"><span class="field-label">File extension</span><input id="extensionInput" name="extension" placeholder=".zip" autocapitalize="none" spellcheck="false" /></label>
+          <label class="field" for="modifiedBeforeInput"><span class="field-label">Modified before (local date)</span><input id="modifiedBeforeInput" name="modified_before" type="date" /></label>
         </div>
 
         <button id="clearFiltersButton" class="ghost-button toolbar-clear" type="button" hidden>Clear filters</button>
-      </div>
+      </search>
+      <details class="analysis-tools">
+        <summary>Analysis &amp; exports</summary>
+        <p class="section-note">File search, extension totals and exports use the filters above. Global search covers all files across the root; extension totals include subfolders. Snapshot comparison uses the current subtree without filters.</p>
+        <div class="analysis-actions">
+          <button id="globalSearchButton" class="ghost-button" type="button">Find files across root</button>
+          <button id="extensionSummaryButton" class="ghost-button" type="button">Summarize file extensions</button>
+          <label class="field" for="exportScope"><span class="field-label">Export scope</span><select id="exportScope"><option value="folder">Direct contents</option><option value="recursive">Include subfolders</option></select></label>
+          <button id="exportCSVButton" class="ghost-button" type="button">Export CSV</button>
+          <button id="exportJSONButton" class="ghost-button" type="button">Export JSON</button>
+        </div>
+        <div class="analysis-actions">
+          <label class="field" for="compareSelect"><span class="field-label">Compare current snapshot against</span><select id="compareSelect"><option value="">Choose a snapshot</option></select></label>
+          <button id="compareButton" class="ghost-button" type="button">Show changes</button>
+        </div>
+        <p id="analysisStatus" class="section-note" role="status"></p>
+        <div id="analysisResults" class="analysis-results"></div>
+        <button id="analysisMoreButton" class="ghost-button" type="button" hidden>Load more results</button>
+      </details>
+      <details id="scanDiagnostics" class="analysis-tools" hidden>
+        <summary id="diagnosticsTitle">Scan coverage</summary>
+        <p id="exclusionSummary" class="section-note"></p>
+        <div id="warningList" class="analysis-results"></div>
+      </details>
+      <p id="allocationNote" class="section-note" hidden>Allocated file data counts hardlinks once per scan. Their allocation is assigned to the first encountered path, so subfolder totals can vary between scans. Filesystem metadata is not included.</p>
     </section>
 
     <section id="appAlert" class="app-alert" hidden aria-live="polite">
@@ -171,6 +206,11 @@
               <div id="detailList" class="item-list" aria-live="polite"></div>
               <p id="detailEmpty" class="list-empty">Run a scan to inspect folders and files.</p>
             </div>
+            <nav class="page-controls" aria-label="Folder result pages">
+              <button id="previousPageButton" class="ghost-button" type="button" disabled>Previous</button>
+              <span id="pageLabel" class="section-note" role="status"></span>
+              <button id="nextPageButton" class="ghost-button" type="button" disabled>Next</button>
+            </nav>
           </section>
         </div>
       </aside>

@@ -111,6 +111,9 @@ window.DiskTreemapApp = (() => {
     if (scan.status === "completed") {
       return { stateName: "completed", text: "Ready" };
     }
+    if (scan.status === "cancelled") {
+      return { stateName: "idle", text: "Cancelled" };
+    }
     if (scan.status === "failed") {
       return { stateName: "failed", text: "Failed" };
     }
@@ -234,6 +237,8 @@ window.DiskTreemapApp = (() => {
       q: (params.get("q") || "").trim(),
       type: (params.get("type") || "").trim(),
       minSize: Math.max(0, parsePositiveInt(params.get("min_size")) || 0),
+      extension: params.get("extension") || "",
+      modifiedBefore: params.get("modified_before") || "",
       sort: (params.get("sort") || "").trim(),
     };
   }
@@ -312,7 +317,7 @@ window.DiskTreemapApp = (() => {
       const type = document.createElement("span");
       type.className = "item-type";
       type.dataset.type = item.type;
-      type.textContent = item.type === "dir" ? "Folder" : "File";
+      type.textContent = item.excluded ? "Excluded" : item.incomplete ? "Incomplete" : item.type === "dir" ? "Folder" : "File";
 
       const size = document.createElement("span");
       size.className = "item-size";

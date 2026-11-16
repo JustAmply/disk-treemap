@@ -2,6 +2,31 @@
   const App = window.DiskTreemapApp;
 
   const els = {
+    summaryAllocated: document.getElementById("summaryAllocated"),
+    allocationNote: document.getElementById("allocationNote"),
+    cancelScanButton: document.getElementById("cancelScanButton"),
+    snapshotSelect: document.getElementById("snapshotSelect"),
+    openSnapshotButton: document.getElementById("openSnapshotButton"),
+    extensionInput: document.getElementById("extensionInput"),
+    modifiedBeforeInput: document.getElementById("modifiedBeforeInput"),
+    globalSearchButton: document.getElementById("globalSearchButton"),
+    extensionSummaryButton: document.getElementById("extensionSummaryButton"),
+    exportScope: document.getElementById("exportScope"),
+    exportCSVButton: document.getElementById("exportCSVButton"),
+    exportJSONButton: document.getElementById("exportJSONButton"),
+    compareSelect: document.getElementById("compareSelect"),
+    compareButton: document.getElementById("compareButton"),
+    analysisStatus: document.getElementById("analysisStatus"),
+    analysisResults: document.getElementById("analysisResults"),
+    analysisMoreButton: document.getElementById("analysisMoreButton"),
+    scanDiagnostics: document.getElementById("scanDiagnostics"),
+    diagnosticsTitle: document.getElementById("diagnosticsTitle"),
+    exclusionSummary: document.getElementById("exclusionSummary"),
+    warningList: document.getElementById("warningList"),
+    previousPageButton: document.getElementById("previousPageButton"),
+    nextPageButton: document.getElementById("nextPageButton"),
+    pageLabel: document.getElementById("pageLabel"),
+
     rootPath: document.getElementById("rootPath"),
     scanButton: document.getElementById("scanButton"),
     emptyScanButton: document.getElementById("emptyScanButton"),
@@ -53,10 +78,17 @@
     type: "",
     minSize: 0,
     sort: "size_desc",
+    extension: "",
+    modifiedBefore: "",
   };
 
   const state = {
     config: null,
+    snapshots: [],
+    pageOffset: 0,
+    analysis: null,
+    analysisController: null,
+    diagnosticsController: null,
     currentScan: null,
     latestCompletedScan: null,
     viewedScanId: null,
@@ -121,6 +153,8 @@
       type: state.urlState.type || "",
       minSize: state.urlState.minSize || 0,
       sort: state.urlState.sort || defaultFilters.sort,
+      extension: state.urlState.extension || "",
+      modifiedBefore: state.urlState.modifiedBefore || "",
     };
     logDebug("config loaded", {
       root: cfg.analyze_root,
@@ -138,6 +172,7 @@
       startPolling(state.currentScan.id);
     }
 
+    await refreshSnapshots();
     const desiredScanId = chooseInitialViewScanId();
     if (!desiredScanId) {
       return;
@@ -147,6 +182,21 @@
   }
 
   function bindEvents() {
+    els.cancelScanButton.addEventListener("click", cancelScan);
+    els.openSnapshotButton.addEventListener("click", () => {
+      if (els.snapshotSelect.value) openViewScan(Number(els.snapshotSelect.value)).catch((err) => showAlert(err.message));
+    });
+    for (const field of [els.extensionInput, els.modifiedBeforeInput]) {
+      field.addEventListener("change", () => applyFiltersFromInputs().catch((err) => showAlert(err.message)));
+    }
+    els.previousPageButton.addEventListener("click", () => changePage(Math.max(0, state.pageOffset - pageSize())));
+    els.nextPageButton.addEventListener("click", () => changePage(state.currentView?.next_offset ?? state.pageOffset + pageSize()));
+    els.globalSearchButton.addEventListener("click", () => runAnalysis("largest"));
+    els.extensionSummaryButton.addEventListener("click", () => runAnalysis("extensions"));
+    els.compareButton.addEventListener("click", () => runAnalysis("diff"));
+    els.analysisMoreButton.addEventListener("click", () => runAnalysis(state.analysis.kind, true));
+    els.exportCSVButton.addEventListener("click", () => exportView("csv"));
+    els.exportJSONButton.addEventListener("click", () => exportView("json"));
     els.scanButton.addEventListener("click", runScan);
     els.emptyScanButton.addEventListener("click", runScan);
     els.alertRetryButton.addEventListener("click", runScan);
@@ -157,7 +207,7 @@
       queueSearchApply();
     });
     els.searchInput.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") {
+      if (event.key !== "Enter" || event.isComposing) {
         return;
       }
       event.preventDefault();
@@ -176,6 +226,8 @@
     els.selectedAction.addEventListener("click", () => {
       if (state.activeItem?.type === "dir" && state.activeItem.path) {
         navigateToPath(state.activeItem.path, state.activeItem.name);
+      } else if (state.activeItem?.parent_path) {
+        navigateToPath(state.activeItem.parent_path);
       }
     });
     els.detailList.addEventListener("scroll", () => {
@@ -207,6 +259,7 @@
   }
 
   function renderAll() {
+    renderTools();
     renderRootPath();
     renderBanner();
     renderSummary();
@@ -290,6 +343,9 @@
     els.summaryPath.title = activePath;
     els.summaryCaption.textContent = buildSummaryCaption(activePath);
     els.summarySize.textContent = folderSize;
+    const allocated = state.currentView?.summary?.allocated_bytes;
+    els.summaryAllocated.textContent = allocated == null ? "Unavailable" : App.formatBytes(allocated);
+    els.allocationNote.hidden = allocated == null;
     els.summaryShownStat.hidden = !showShownSize;
     els.summaryShownLabel.textContent = "In view";
     els.summaryShown.textContent = shownSize;
@@ -350,10 +406,10 @@
     els.selectedPath.textContent = selected.path ? App.shortPath(selected.path) : "Grouped items in the current view";
     els.selectedPath.title = selected.path || "Grouped items in the current view";
 
-    const canOpen = isFolder && !isSynthetic && !isCurrentFolder;
+    const canOpen = !isSynthetic && !selected.excluded && (isFolder ? !isCurrentFolder : Boolean(selected.parent_path));
     els.selectedAction.hidden = !canOpen;
     els.selectedAction.disabled = !canOpen;
-    els.selectedAction.textContent = "Open folder";
+    els.selectedAction.textContent = isFolder ? "Open folder" : "Open containing folder";
   }
 
   function renderDetailList() {
@@ -528,6 +584,8 @@
       logDebug("opening scan", { scanId, preservePath, fallbackOnMissing });
       const selected = await App.apiGet(`/api/v1/scans/${encodeURIComponent(scanId)}`);
       state.viewedScanId = scanId;
+      els.snapshotSelect.value = String(scanId);
+      loadDiagnostics(scanId);
 
       if (selected.status === "completed") {
         if (!state.latestCompletedScan || selected.id >= state.latestCompletedScan.id) {
@@ -610,8 +668,18 @@
           App.logScanWarnings(scan);
           state.latestCompletedScan = scan;
           state.viewedScanId = scan.id;
+          await refreshSnapshots();
+          loadDiagnostics(scan.id);
           state.currentPath = state.currentView?.path || state.config?.analyze_root || state.currentPath;
           await loadPath(state.currentPath);
+          return;
+        }
+
+        if (scan.status === "cancelled") {
+          clearPolling();
+          disableScanButtons(false);
+          showAlert("Scan cancelled. The last complete snapshot is still available.");
+          renderAll();
           return;
         }
 
@@ -651,7 +719,7 @@
     await loadPath(state.currentPath || state.config?.analyze_root);
   }
 
-  async function loadPath(path) {
+  async function loadPath(path, offset = 0) {
     if (!state.viewedScanId) {
       logDebug("skipped path load because no scan is selected", { path });
       return;
@@ -660,6 +728,8 @@
     abortViewLoad();
 
     state.currentPath = path;
+    state.pageOffset = offset;
+    clearAnalysis();
     state.pathLoading = true;
     state.detailScrollTop = 0;
     state.alert = null;
@@ -670,14 +740,9 @@
     state.viewAbortController = controller;
 
     try {
-      const query = new URLSearchParams({
-        path,
-        limit: String(state.config?.max_children_per_query || 500),
-        q: state.filters.q,
-        type: state.filters.type,
-        min_size: String(state.filters.minSize),
-        sort: state.filters.sort,
-      });
+      const query = viewQuery(path);
+      query.set("limit", String(pageSize()));
+      query.set("offset", String(offset));
 
       const response = await App.apiGet(`/api/v1/scans/${state.viewedScanId}/explore?${query.toString()}`, {
         signal: controller.signal,
@@ -740,6 +805,9 @@
       path: view.path,
       type: "dir",
       size_bytes: view.summary?.total_bytes || 0,
+      allocated_bytes: view.summary?.allocated_bytes,
+      incomplete: view.summary?.incomplete,
+      excluded: view.summary?.excluded,
     };
   }
 
@@ -758,6 +826,8 @@
     els.typeFilter.value = state.filters.type;
     els.minSizeInput.value = String(state.filters.minSize || 0);
     els.sortSelect.value = state.filters.sort || defaultFilters.sort;
+    els.extensionInput.value = state.filters.extension;
+    els.modifiedBeforeInput.value = state.filters.modifiedBefore;
   }
 
   async function applyFiltersFromInputs() {
@@ -766,6 +836,8 @@
       type: (els.typeFilter.value || "").trim(),
       minSize: Math.max(0, Number.parseInt(els.minSizeInput.value || "0", 10) || 0),
       sort: (els.sortSelect.value || "").trim() || defaultFilters.sort,
+      extension: els.extensionInput.value.trim(),
+      modifiedBefore: els.modifiedBeforeInput.value,
     };
     syncFilterInputs();
     await reloadCurrentPath();
@@ -779,6 +851,8 @@
 
   function filtersAreActive() {
     return Boolean(
+      state.filters.extension ||
+      state.filters.modifiedBefore ||
       state.filters.q ||
       state.filters.type ||
       state.filters.minSize > 0 ||
@@ -790,7 +864,7 @@
     if (!item) {
       return;
     }
-    state.activeItem = item;
+    state.activeItem = state.currentView?.items.find((entry) => entry.path === item.path) || item;
     renderSelectedCard();
     renderDetailList();
     scheduleTreemapRender();
@@ -835,27 +909,27 @@
     const items = App.formatCount(summary.matching_item_count || 0);
     const dirs = App.formatCount(summary.visible_dir_count || 0);
     const files = App.formatCount(summary.visible_file_count || 0);
-    const base = `${items} matching items • ${dirs} folders • ${files} files • ${sortLabel}`;
+    const base = `${items} matching items â€¢ ${dirs} folders â€¢ ${files} files â€¢ ${sortLabel}`;
 
     if (!summary.is_result_truncated) {
       return base;
     }
 
-    return `${base} • showing ${App.formatCount(summary.returned_item_count || 0)} rows`;
+    return `${base} â€¢ showing ${App.formatCount(summary.returned_item_count || 0)} rows`;
   }
 
   function buildInspectorMeta(summary, path) {
     const shown = App.formatBytes(summary.visible_bytes || 0);
     const total = App.formatBytes(summary.total_bytes || 0);
-    return `Direct contents of ${App.basename(path) || path} • ${shown} in view of ${total}`;
+    return `Direct contents of ${App.basename(path) || path} â€¢ ${shown} in view of ${total}`;
   }
 
   function buildSelectedMeta(item) {
     if (item.synthetic) {
-      return `${App.formatCount(item.hidden_item_count || 0)} grouped items • ${App.formatBytes(item.size_bytes || 0)}`;
+      return `${App.formatCount(item.hidden_item_count || 0)} grouped items â€¢ ${App.formatBytes(item.size_bytes || 0)}`;
     }
     const typeLabel = item.type === "dir" ? "Folder" : "File";
-    return `${typeLabel} • ${App.formatBytes(item.size_bytes || 0)}`;
+    return `${typeLabel} â€¢ ${App.formatBytes(item.size_bytes || 0)}`;
   }
 
   function buildSummaryPathLabel(activePath) {
@@ -893,13 +967,15 @@
     }
 
     const summary = state.currentView.summary;
+    if (summary.incomplete) return "Incomplete scan coverage: unreadable contents are missing from these totals. See Scan coverage.";
+    if (summary.excluded) return "This folder was excluded from the scan. Its contents were not measured.";
     if (summary.has_active_filters) {
       return summary.is_result_truncated
         ? "Filtered view with the largest matching direct entries."
         : "Filtered view of the matching direct entries.";
     }
     if (summary.is_result_truncated) {
-      return "Showing the largest direct entries in this folder.";
+      return "Showing one page of direct entries in this folder.";
     }
     if (activePath === state.config?.analyze_root) {
       return "Configured root folder.";
@@ -917,7 +993,7 @@
       return `Filtered view: ${matching} matching items, ${visibleBytes} represented in the treemap.`;
     }
     if (summary.is_result_truncated) {
-      return `Showing ${shown} of ${matching} direct items. Refine the filters to isolate smaller entries faster.`;
+      return `Showing ${shown} of ${matching} direct items on this page. Use Previous and Next to browse all results.`;
     }
     return `Showing the full folder inventory: ${matching} direct items, ${totalBytes} total.`;
   }
@@ -972,11 +1048,185 @@
     App.replaceUrl("/", {
       scan: state.viewedScanId || null,
       path: state.currentPath || null,
+      extension: state.filters.extension || null,
+      modified_before: state.filters.modifiedBefore || null,
       q: state.filters.q || null,
       type: state.filters.type || null,
       min_size: state.filters.minSize > 0 ? state.filters.minSize : null,
       sort: state.filters.sort && state.filters.sort !== defaultFilters.sort ? state.filters.sort : null,
     });
+  }
+
+  function pageSize() {
+    return state.config?.max_children_per_query || 500;
+  }
+
+  function viewQuery(path) {
+    const query = new URLSearchParams({ path, q: state.filters.q, type: state.filters.type,
+      min_size: String(state.filters.minSize), sort: state.filters.sort, extension: state.filters.extension });
+    if (state.filters.modifiedBefore) {
+      const localMidnight = new Date(`${state.filters.modifiedBefore}T00:00:00`).getTime();
+      if (Number.isFinite(localMidnight)) query.set("modified_before", String(Math.floor(localMidnight / 1000)));
+    }
+    return query;
+  }
+
+  function changePage(offset) {
+    loadPath(state.currentPath, offset).catch((err) => showAlert(`Could not load page: ${err.message}`));
+  }
+
+  function renderTools() {
+    const ready = Boolean(state.viewedScanId && state.currentView && !state.pathLoading);
+    els.cancelScanButton.hidden = !App.isScanActive(state.currentScan);
+    els.openSnapshotButton.disabled = !state.snapshots.length || state.pathLoading;
+    for (const button of [els.globalSearchButton, els.extensionSummaryButton, els.exportCSVButton, els.exportJSONButton, els.compareButton]) {
+      button.disabled = !ready;
+    }
+    els.previousPageButton.disabled = !ready || state.pageOffset === 0;
+    els.nextPageButton.disabled = !ready || !state.currentView?.has_more;
+    els.pageLabel.textContent = ready ? `Page ${Math.floor(state.pageOffset / pageSize()) + 1}` : "";
+  }
+
+  async function cancelScan() {
+    if (!App.isScanActive(state.currentScan)) return;
+    els.cancelScanButton.disabled = true;
+    try {
+      await App.apiPost(`/api/v1/scans/${state.currentScan.id}/cancel`);
+      showAlert("Cancellation requested. Waiting for the scan to stop.");
+    } catch (err) {
+      showAlert(`Could not cancel scan: ${err.message}`);
+    } finally {
+      els.cancelScanButton.disabled = false;
+    }
+  }
+
+  async function refreshSnapshots() {
+    const response = await App.apiGet("/api/v1/scans");
+    state.snapshots = response.scans.filter((scan) => scan.status === "completed");
+    const comparison = els.compareSelect.value;
+    for (const select of [els.snapshotSelect, els.compareSelect]) {
+      select.replaceChildren();
+      if (select === els.compareSelect || !state.snapshots.length) {
+        select.add(new Option(select === els.compareSelect ? "Choose a snapshot" : "No snapshots yet", ""));
+      }
+      for (const scan of state.snapshots) {
+        select.add(new Option(`#${scan.id} Â· ${new Date(scan.finished_at).toLocaleString()} Â· ${App.formatBytes(scan.total_bytes)}`, String(scan.id)));
+      }
+    }
+    els.snapshotSelect.value = String(state.viewedScanId || state.snapshots[0]?.id || "");
+    els.compareSelect.value = comparison;
+    renderTools();
+  }
+
+  async function loadDiagnostics(scanId) {
+    state.diagnosticsController?.abort();
+    const controller = new AbortController();
+    state.diagnosticsController = controller;
+    els.scanDiagnostics.hidden = true;
+    try {
+      const data = await App.apiGet(`/api/v1/scans/${scanId}/diagnostics`, { signal: controller.signal });
+      if (state.viewedScanId !== scanId) return;
+      const warnings = data.warnings || [];
+      const patterns = data.exclude_patterns || [];
+      els.scanDiagnostics.hidden = warnings.length === 0 && patterns.length === 0;
+      els.diagnosticsTitle.textContent = `Scan coverage Â· ${warnings.length} warnings Â· ${data.excluded_count || 0} excluded entries`;
+      els.exclusionSummary.textContent = patterns.length ? `Excluded patterns: ${patterns.join(", ")}. Excluded folders were not traversed.` : "No exclusion patterns. Unreadable contents are not included in size totals.";
+      els.warningList.replaceChildren();
+      for (const warning of warnings) appendAnalysisRow(els.warningList, warning.path, `${warning.operation}: ${warning.message}`);
+    } catch (err) {
+      if (err.name !== "AbortError") showAlert(`Could not load scan coverage: ${err.message}`);
+    }
+  }
+
+  function clearAnalysis() {
+    state.analysisController?.abort();
+    state.analysisController = null;
+    state.analysis = null;
+    els.analysisResults.replaceChildren();
+    els.analysisStatus.textContent = "";
+    els.analysisMoreButton.hidden = true;
+  }
+
+  function appendAnalysisRow(container, title, detail) {
+    const row = document.createElement("div");
+    row.className = "analysis-row";
+    const heading = document.createElement("p");
+    heading.textContent = title;
+    const description = document.createElement("p");
+    description.className = "section-note";
+    description.textContent = detail;
+    row.append(heading, description);
+    container.append(row);
+  }
+
+  async function runAnalysis(kind, more = false) {
+    if (!state.viewedScanId) return;
+    const base = more ? state.analysis.base : els.compareSelect.value;
+    if (kind === "diff" && (!base || Number(base) === Number(state.viewedScanId))) {
+      els.analysisStatus.textContent = "Choose a different snapshot to compare against.";
+      return;
+    }
+    state.analysisController?.abort();
+    const controller = new AbortController();
+    state.analysisController = controller;
+    const offset = more ? state.analysis.offset : 0;
+    if (!more) els.analysisResults.replaceChildren();
+    els.analysisMoreButton.hidden = true;
+    els.analysisStatus.textContent = "Loading analysisâ€¦";
+    const path = kind === "largest" ? state.config.analyze_root : state.currentPath;
+    const query = viewQuery(path);
+    query.set("limit", "100");
+    query.set("offset", String(offset));
+    if (kind === "largest") query.set("type", "file");
+    if (kind === "diff") query.set("base", base);
+    try {
+      const result = await App.apiGet(`/api/v1/scans/${state.viewedScanId}/${kind}?${query}`, { signal: controller.signal });
+      if (state.analysisController !== controller) return;
+      const items = result.items || [];
+      if (kind === "largest") {
+        const list = document.createElement("div");
+        list.className = "item-list";
+        App.renderItemList(list, items, { activePath: "", onFocus: selectItem, onNavigate: navigateToPath });
+        els.analysisResults.append(list);
+      } else if (kind === "extensions") {
+        for (const item of items) appendAnalysisRow(els.analysisResults, item.extension || "No extension", `${App.formatCount(item.count)} files Â· ${App.formatBytes(item.total_bytes)}`);
+      } else {
+        for (const item of items) {
+          const delta = `${item.delta_bytes < 0 ? "âˆ’" : "+"}${App.formatBytes(Math.abs(item.delta_bytes))}`;
+          appendAnalysisRow(els.analysisResults, item.path, `${item.change} Â· ${App.formatBytes(item.before_bytes)} â†’ ${App.formatBytes(item.after_bytes)} (${delta})`);
+        }
+      }
+      const count = offset + items.length;
+      const label = kind === "largest" ? "Files across the root" : kind === "extensions" ? "File extensions in this subtree" : `Changes from #${base} to #${state.viewedScanId} in this subtree (file sizes; folder totals overlap)`;
+      els.analysisStatus.textContent = `${label}: ${App.formatCount(count)} results${result.has_more ? "; more available" : ""}.`;
+      state.analysis = { kind, base, offset: result.next_offset ?? count };
+      els.analysisMoreButton.hidden = !result.has_more;
+    } catch (err) {
+      if (err.name !== "AbortError") els.analysisStatus.textContent = `Analysis failed: ${err.message}`;
+    }
+  }
+
+  async function exportView(format) {
+    if (!state.viewedScanId) return;
+    const query = viewQuery(state.currentPath);
+    query.set("format", format);
+    query.set("scope", els.exportScope.value);
+    els.analysisStatus.textContent = "Preparing exportâ€¦";
+    try {
+      const response = await fetch(`/api/v1/scans/${state.viewedScanId}/export?${query}`);
+      if (!response.ok) throw new Error((await response.json()).error || "Export request failed");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `disk-treemap-${state.viewedScanId}.${format}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      els.analysisStatus.textContent = "Export downloaded.";
+    } catch (err) {
+      els.analysisStatus.textContent = `Export failed: ${err.message}`;
+    }
   }
 
   function clearPolling() {
