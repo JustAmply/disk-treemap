@@ -53,7 +53,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           mux,
+		Handler:           api.RequireAuth(mux, cfg.AuthUsername, cfg.AuthPassword),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      60 * time.Second,

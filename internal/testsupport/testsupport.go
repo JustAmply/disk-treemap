@@ -103,7 +103,7 @@ func WaitForTerminalScanWithin(t *testing.T, scanID int64, getRun func() (store.
 		run, err := getRun()
 		lastRun = run
 		lastErr = err
-		if err == nil && (run.Status == store.ScanCompleted || run.Status == store.ScanFailed) {
+		if err == nil && (run.Status == store.ScanCompleted || run.Status == store.ScanFailed || run.Status == store.ScanCancelled) {
 			return run
 		}
 		time.Sleep(5 * time.Millisecond)

@@ -146,6 +146,18 @@ func (l *scanRunLifecycle) fail(scanID int64, scanErr error, totalBytes, totalNo
 	l.clear(scanID)
 }
 
+func (l *scanRunLifecycle) cancelled(scanID int64) {
+	if err := l.store.FinishRun(context.Background(), scanID, store.ScanOutcome{
+		Status:     store.ScanCancelled,
+		FinishedAt: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("scan #%d record cancellation warning: %v", scanID, err)
+	}
+	l.clearLiveState(scanID)
+	l.prune(scanID)
+	l.clear(scanID)
+}
+
 func (l *scanRunLifecycle) get(ctx context.Context, scanID int64) (store.ScanRun, error) {
 	run, err := l.store.GetScanRun(ctx, scanID)
 	if err != nil {

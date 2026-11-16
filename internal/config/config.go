@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/justamply/disk-treemap/internal/scan"
 	"github.com/justamply/disk-treemap/internal/scancontrol"
 )
 
@@ -30,6 +32,10 @@ var removedTuningEnv = []string{
 }
 
 type Config struct {
+	AuthUsername         string
+	AuthPassword         string
+	SnapshotRetention    int
+	ScanExclusions       []string
 	AnalyzeRoot          string
 	ListenAddr           string
 	DataDir              string
@@ -50,6 +56,27 @@ func LoadFromEnv() (Config, error) {
 
 	if cfg.AnalyzeRoot == "" {
 		return Config{}, errors.New("ANALYZE_ROOT is required")
+	}
+	cfg.AuthUsername = os.Getenv("AUTH_USERNAME")
+	cfg.AuthPassword = os.Getenv("AUTH_PASSWORD")
+	if (cfg.AuthUsername == "") != (cfg.AuthPassword == "") {
+		return Config{}, errors.New("AUTH_USERNAME and AUTH_PASSWORD must both be set")
+	}
+	retention, err := parseIntEnv("SNAPSHOT_RETENTION", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	if retention < 1 {
+		return Config{}, errors.New("SNAPSHOT_RETENTION must be at least 1")
+	}
+	cfg.SnapshotRetention = retention
+	if raw := os.Getenv("SCAN_EXCLUDE"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &cfg.ScanExclusions); err != nil {
+			return Config{}, errors.New("SCAN_EXCLUDE must be a JSON array of relative glob patterns")
+		}
+		if err := scan.ValidateExclusions(cfg.ScanExclusions); err != nil {
+			return Config{}, fmt.Errorf("SCAN_EXCLUDE: %w", err)
+		}
 	}
 	if !filepath.IsAbs(cfg.AnalyzeRoot) {
 		return Config{}, fmt.Errorf("ANALYZE_ROOT must be absolute: %q", cfg.AnalyzeRoot)

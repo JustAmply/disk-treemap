@@ -9,6 +9,45 @@ import (
 	"github.com/justamply/disk-treemap/internal/scancontrol"
 )
 
+func TestLoadFromEnvRequiresCompleteAuthCredentials(t *testing.T) {
+	for _, pair := range [][2]string{{"reader", ""}, {"", "password"}, {"reader", "password"}} {
+		t.Run(pair[0]+"/configured", func(t *testing.T) {
+			t.Setenv("ANALYZE_ROOT", t.TempDir())
+			t.Setenv("AUTH_USERNAME", pair[0])
+			t.Setenv("AUTH_PASSWORD", pair[1])
+			_, err := LoadFromEnv()
+			wantError := pair[0] == "" || pair[1] == ""
+			if (err != nil) != wantError {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnvAnalysisSettings(t *testing.T) {
+	t.Setenv("ANALYZE_ROOT", t.TempDir())
+	t.Setenv("SNAPSHOT_RETENTION", "3")
+	t.Setenv("SCAN_EXCLUDE", `["cache","downloads/*.tmp"]`)
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SnapshotRetention != 3 || len(cfg.ScanExclusions) != 2 {
+		t.Fatalf("settings not loaded: %d %v", cfg.SnapshotRetention, cfg.ScanExclusions)
+	}
+	for _, raw := range []string{`["../outside"]`, `not-json`, `["**"]`} {
+		t.Setenv("SCAN_EXCLUDE", raw)
+		if _, err := LoadFromEnv(); err == nil {
+			t.Fatalf("accepted invalid exclusions %s", raw)
+		}
+	}
+	t.Setenv("SCAN_EXCLUDE", "[]")
+	t.Setenv("SNAPSHOT_RETENTION", "0")
+	if _, err := LoadFromEnv(); err == nil {
+		t.Fatal("accepted zero retention")
+	}
+}
+
 func TestLoadFromEnvRequiresAnalyzeRoot(t *testing.T) {
 	t.Setenv("ANALYZE_ROOT", "")
 	_, err := LoadFromEnv()

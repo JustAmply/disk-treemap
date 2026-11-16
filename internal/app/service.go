@@ -19,6 +19,7 @@ const minProgressInterval = 10 * time.Millisecond
 
 var (
 	ErrScanRunning         = errors.New("scan already running")
+	ErrScanNotActive       = errors.New("scan is not active")
 	ErrServiceShuttingDown = errors.New("service is shutting down")
 	ErrInvalidInput        = errors.New("invalid input")
 )
@@ -71,10 +72,13 @@ type Service struct {
 	activeScanID     int64
 	activeScanCancel context.CancelFunc
 	activeScanDone   chan struct{}
+	userCancelled    bool
+	finalizingScan   bool
 	shuttingDown     bool
 }
 
 func NewService(cfg config.Config, st *store.Store) *Service {
+	st.SetSnapshotRetention(cfg.SnapshotRetention)
 	return &Service{
 		cfg:         cfg,
 		store:       st,
@@ -112,6 +116,8 @@ func (s *Service) StartScan(ctx context.Context) (int64, error) {
 	s.activeScanID = scanID
 	s.activeScanCancel = cancel
 	s.activeScanDone = done
+	s.userCancelled = false
+	s.finalizingScan = false
 
 	limits := scancontrol.New(s.cfg.ScanProfile).Limits()
 	log.Printf(
@@ -136,7 +142,7 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 	}()
 
 	if err := s.runs.start(runCtx, scanID); err != nil {
-		s.runs.fail(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
+		s.failScan(scanID, fmt.Errorf("set running status: %w", err), 0, 0, 0)
 		return
 	}
 	log.Printf("scan #%d running", scanID)
@@ -158,7 +164,7 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 
 	writer, err := s.store.BeginSnapshot(scanCtx, scanID)
 	if err != nil {
-		s.runs.fail(scanID, fmt.Errorf("open node writer: %w", err), 0, 0, 0)
+		s.failScan(scanID, fmt.Errorf("open node writer: %w", err), 0, 0, 0)
 		return
 	}
 
@@ -179,6 +185,15 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 	go s.runNodeWriter(scanCtx, scanID, writer, nodeCh, writerErrCh, batchController, progressInterval, cancel)
 
 	scanner := s.makeScanner(s.cfg.AnalyzeRoot, limits.Max.Concurrency)
+	if configurable, ok := scanner.(interface{ SetExclusions([]string) error }); ok {
+		if err := configurable.SetExclusions(s.cfg.ScanExclusions); err != nil {
+			close(nodeCh)
+			<-writerErrCh
+			_ = writer.Discard()
+			s.failScan(scanID, err, 0, 0, 0)
+			return
+		}
+	}
 	autotuneCtx, cancelAutotune := context.WithCancel(scanCtx)
 	defer cancelAutotune()
 	if tuner, ok := scanner.(scan.AdjustableConcurrency); ok {
@@ -193,12 +208,16 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 	}
 	result, scanErr := scanner.Scan(scanCtx, func(node scan.NodeRecord) error {
 		storedNode := store.Node{
-			Path:       node.Path,
-			ParentPath: node.ParentPath,
-			Name:       node.Name,
-			Kind:       node.Kind,
-			SizeBytes:  node.SizeBytes,
-			MtimeUnix:  node.MtimeUnix,
+			Path:           node.Path,
+			ParentPath:     node.ParentPath,
+			Name:           node.Name,
+			Kind:           node.Kind,
+			SizeBytes:      node.SizeBytes,
+			MtimeUnix:      node.MtimeUnix,
+			AllocatedBytes: node.AllocatedBytes,
+			Incomplete:     node.Incomplete,
+			Excluded:       node.Excluded,
+			Hardlink:       node.Hardlink,
 		}
 
 		select {
@@ -220,6 +239,9 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 
 	if scanErr != nil || writerErr != nil {
 		_ = writer.Discard()
+		if err := s.saveDiagnostics(scanID, result); err != nil {
+			log.Printf("scan #%d save diagnostics: %v", scanID, err)
+		}
 		runErr := scanErr
 		if writerErr != nil && !isContextError(writerErr) {
 			// A writer failure cancels the scan context, so the scanner only
@@ -229,19 +251,32 @@ func (s *Service) runScan(scanID int64, runCtx context.Context, runCancel contex
 			runErr = writerErr
 		}
 		log.Printf("scan #%d failed: %v (nodes=%d bytes=%d warnings=%d)", scanID, runErr, result.TotalNodes, result.TotalBytes, result.WarningCount)
-		s.runs.fail(scanID, runErr, 0, 0, result.WarningCount)
+		s.failScan(scanID, runErr, 0, 0, result.WarningCount)
 		return
 	}
 
+	s.lifecycleMu.Lock()
+	if s.userCancelled {
+		s.lifecycleMu.Unlock()
+		_ = writer.Discard()
+		s.runs.cancelled(scanID)
+		return
+	}
+	s.finalizingScan = true
+	s.lifecycleMu.Unlock()
 	commitStarted := time.Now()
 	if err := writer.Publish(); err != nil {
-		s.runs.fail(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
+		s.failScan(scanID, fmt.Errorf("commit nodes: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
 	log.Printf("scan #%d committed staged nodes: nodes=%d bytes=%d warnings=%d duration=%s", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount, time.Since(commitStarted))
+	if err := s.saveDiagnostics(scanID, result); err != nil {
+		s.failScan(scanID, fmt.Errorf("save scan diagnostics: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
+		return
+	}
 
 	if err := s.runs.complete(scanID, result); err != nil {
-		s.runs.fail(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
+		s.failScan(scanID, fmt.Errorf("complete scan record: %w", err), result.TotalBytes, result.TotalNodes, result.WarningCount)
 		return
 	}
 	log.Printf("scan #%d completed: nodes=%d bytes=%d warnings=%d", scanID, result.TotalNodes, result.TotalBytes, result.WarningCount)
@@ -258,6 +293,39 @@ func (s *Service) finishActiveScan(scanID int64, done chan struct{}) {
 		return
 	}
 	close(done)
+}
+
+func (s *Service) CancelScan(scanID int64) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.activeScanID != scanID || s.activeScanCancel == nil || s.finalizingScan {
+		return ErrScanNotActive
+	}
+	s.userCancelled = true
+	s.activeScanCancel()
+	return nil
+}
+
+func (s *Service) wasCancelled(scanID int64) bool {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	return s.activeScanID == scanID && s.userCancelled
+}
+
+func (s *Service) failScan(scanID int64, err error, bytes, nodes, warnings int64) {
+	if s.wasCancelled(scanID) {
+		s.runs.cancelled(scanID)
+		return
+	}
+	s.runs.fail(scanID, err, bytes, nodes, warnings)
+}
+
+func (s *Service) saveDiagnostics(scanID int64, result scan.Result) error {
+	details := store.ScanDiagnostics{ExcludedCount: result.ExcludedCount, ExcludePatterns: result.ExcludePatterns}
+	for _, warning := range result.Warnings {
+		details.Warnings = append(details.Warnings, store.ScanWarning{Path: warning.Path, Operation: warning.Operation, Message: warning.Message})
+	}
+	return s.store.SaveScanDiagnostics(context.Background(), scanID, details)
 }
 
 // Shutdown prevents new scans, cancels the active scan, and waits for its
